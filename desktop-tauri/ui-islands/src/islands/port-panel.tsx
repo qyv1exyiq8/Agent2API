@@ -15,7 +15,6 @@ import {
   type StatusDotProps,
 } from '@ui'
 import { t } from '../i18n'
-import { API_ENDPOINTS } from '../../../ui-shared/docs-api-endpoints'
 
 /**
  * Agent2API · 端口状态面板（React 岛）。
@@ -240,23 +239,6 @@ function isReady(): boolean {
   return snapshot.backend?.ready === true
 }
 
-/**
- * 只负责写接口条里的地址元素，首次渲染与端口补更新共用，避免两处文案走偏。
- *
- * 对话协议三种都写出来（Chat Completions / Responses / Anthropic Messages）：
- * 客户端支持哪种就填哪一行，三家共用同一套模型与账号池。
- * 元素缺失（不在「文档」页 / 旧 DOM）时静默跳过，别让 render 崩。
- */
-function paintGatewayAddress(base: string): void {
-  const paint = (id: string, text: string) => {
-    const el = document.getElementById(id)
-    if (el) el.textContent = text
-  }
-  for (const endpoint of API_ENDPOINTS) {
-    paint(endpoint.id, `${endpoint.method ? `${endpoint.method} ` : ''}${base}${endpoint.path}`)
-  }
-}
-
 /** 防止并发重复请求（轮询与切页可能同时触发） */
 let syncing = false
 
@@ -282,7 +264,6 @@ async function sync(): Promise<void> {
       // 取不到就保持原值：页面照常显示，不留空也不报错
       gatewayBase: gatewayBaseFor(port, current.gatewayBase),
     }
-    if (next.gatewayBase !== current.gatewayBase) paintGatewayAddress(next.gatewayBase)
     publish(next)
     shared().wbApp?.renderTopbarStatus?.()
   } catch (error) {
@@ -294,9 +275,8 @@ async function sync(): Promise<void> {
   }
 }
 
-/** 由 app.js 的 render() 调用：重画地址与状态，并异步补上真实端口 */
+/** 由 app.js 的 render() 调用：异步补上真实端口 */
 function render(): void {
-  paintGatewayAddress(snapshot.gatewayBase)
   void sync()
 }
 

@@ -69,8 +69,6 @@
    * `icon` 是 icons.js 里的键。
    */
   const MENUS = [
-    { key: 'assistant', label: wbI18n.t('对话'), icon: 'spark' },
-    { key: 'overview', label: wbI18n.t('报表'), icon: 'overview' },
     { key: 'accounts', label: wbI18n.t('账号'), icon: 'accounts' },
     // 签到中心：**固定项**，与「账号」「模型管理」同级，不随插件装没装而消失。
     //
@@ -86,9 +84,7 @@
     // MCP & Skills：给客户端装上的可选能力（网络搜索 / 视觉分析），排在客户端
     // 配置之后、出网代理之前 —— 前者是「接哪些客户端」，这一项是「接了能用什么」。
     { key: 'tools', label: wbI18n.t('MCP & Skills'), icon: 'tools' },
-    { key: 'proxies', label: wbI18n.t('网络代理'), icon: 'proxies' },
     { key: 'keys', label: wbI18n.t('网关 Key'), icon: 'key' },
-    { key: 'docs', label: wbI18n.t('文档'), icon: 'logs' },
     { key: 'requests', label: wbI18n.t('请求日志'), icon: 'requests' },
     { key: 'logs', label: wbI18n.t('日志'), icon: 'logs' },
     { key: 'scheduled', label: wbI18n.t('定时任务'), icon: 'scheduled' },
@@ -215,24 +211,21 @@
    * 默认布局 —— 「概览 / 转发链路 / 诊断 / 系统」。
    *
    * 与改动前的「智能 / 运行状态 / 转发能力 / 诊断」相比，调整的三处及理由：
-   *   · 「智能」只有 AI 助手一项，单项成组只多占一行，且「智能」这个词指向不明
-   *     （AI 能力？智能路由？）—— 并入「概览」，与报表 / 账号 / 签到中心一起，
-   *     这四项都是「看一眼现状」的页面；
-   *   · 「运行状态」名不副实：报表是状态，账号是资源，签到中心是运营动作，
-   *     三者不是同一类东西 —— 拆掉，各自归位；
+   *   · 「智能」只有 AI 助手一项，单项成组只多占一行 —— 那一项已移除；
+   *   · 「运行状态」名不副实：报表是状态，账号是资源，签到中心是运营动作 ——
+   *     报表已移除，保留账号 / 签到中心归在概览；
    *   · 「设置」原本塞在「诊断」里，但它是全局系统入口而不是排障工具 ——
    *     单独成「系统」组，固定项也在这一组；
-   *   · 「转发能力」改叫「转发链路」：模型管理 / Agent / 网络代理是同一个转发链
-   *     的三段（发给谁 / 谁来发 / 从哪出去），网关 Key 与文档是「怎么接进来」。
-   *     五项归属本身没问题，只把组名说得更准。
+   *   · 「转发能力」改叫「转发链路」：路由 / 模型管理 / Agent / MCP & Skills /
+   *     网关 Key 是同一个转发链的不同环节，只把组名说得更准。
    */
   function defaultLayout() {
     return {
       groups: [
         { id: 'g-overview', label: '概览', custom: false, hidden: false,
-          items: ['assistant', 'overview', 'accounts', 'checkin'] },
+          items: ['accounts', 'checkin'] },
         { id: 'g-forward', label: '转发链路', custom: false, hidden: false,
-          items: ['routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs'] },
+          items: ['routing', 'gateway', 'agent', 'tools', 'keys'] },
         { id: 'g-diag', label: '诊断', custom: false, hidden: false,
           items: ['requests', 'logs', 'scheduled', 'tasks'] },
         { id: 'g-system', label: '系统', custom: false, hidden: false,

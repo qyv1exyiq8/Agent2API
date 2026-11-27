@@ -27,8 +27,8 @@ type HostWindow = {
 
 const host = () => window as unknown as HostWindow
 let groups: Group[] = []
-let page = 'overview'
-let label = t('报表')
+let page = 'accounts'
+let label = t('账号')
 let mode = localStorage.getItem('workbuddy-desktop-theme') || 'system'
 let status: Status[] = []
 let title = ''
@@ -118,7 +118,7 @@ function Frame() {
         <div id='page-refresh-actions' />
       </PageHeader>
       <div className='content'><div className='content-inner'>
-        {['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'scheduled', 'tasks', 'requests', 'plugins', 'settings'].map(key =>
+        {['accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'keys', 'logs', 'scheduled', 'tasks', 'requests', 'plugins', 'settings'].map(key =>
           <section key={key} className={`page${page === key ? ' active' : ''}`} data-page={key} />)}
         <section className={`page${page.startsWith('plugin:') ? ' active' : ''}`} data-page='__plugin__' id='plugin-page-host' />
       </div></div>

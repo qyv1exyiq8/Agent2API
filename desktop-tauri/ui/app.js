@@ -139,23 +139,19 @@ function applyZoom(percent) {
 // ─── 页面导航 ────────────────────────────────
 
 const PAGE_KEY = 'workbuddy-desktop-page';
-const PAGES = ['assistant', 'overview', 'accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'proxies', 'keys', 'docs', 'logs', 'scheduled', 'tasks', 'requests', 'plugins', 'settings'];
-/** 页签中文名：顶栏面包屑用。overview 的用户可见名是「报表」、gateway 的是「模型管理」
+const PAGES = ['accounts', 'checkin', 'routing', 'gateway', 'agent', 'tools', 'keys', 'logs', 'scheduled', 'tasks', 'requests', 'plugins', 'settings'];
+/** 页签中文名：顶栏面包屑用。gateway 的用户可见名是「模型管理」
  *  （内部标识保持不变：localStorage 记忆、showPage 与 CSS 的 [data-page] 选择器都依赖它）
  *
  *  `checkin` 是**内置页**（见 index.html 的说明）：页面归网关，签到能力归插件。 */
 const PAGE_LABELS = {
-  assistant: wbI18n.t('对话'),
-  overview: wbI18n.t('报表'),
   accounts: wbI18n.t('账号'),
   checkin: wbI18n.t('签到中心'),
   routing: wbI18n.t('路由'),
   gateway: wbI18n.t('模型管理'),
   agent: wbI18n.t('Agent 配置'),
   tools: wbI18n.t('MCP & Skills'),
-  proxies: wbI18n.t('网络代理'),
   keys: wbI18n.t('网关 Key'),
-  docs: wbI18n.t('文档'),
   logs: wbI18n.t('日志'),
   scheduled: wbI18n.t('定时任务'),
   tasks: wbI18n.t('自动维护'),
@@ -165,7 +161,7 @@ const PAGE_LABELS = {
 };
 
 /** 当前页（子模块据此判断是否需要重新加载） */
-let currentPage = 'overview';
+let currentPage = 'accounts';
 
 /**
  * 插件申报的页面（`plugin:<pack>:<page>` → `{ label, url }`）。
@@ -246,7 +242,7 @@ function adoptPluginPages(data) {
   window.wbCheckin?.invalidate?.();
   // 当前正停在某个插件页、而它刚被卸载：退回默认页，别让用户对着一块空白
   if (currentPage.startsWith(PLUGIN_PAGE_PREFIX) && !pluginPages.has(currentPage)) {
-    showPage('overview', { persist: false });
+    showPage('accounts', { persist: false });
   }
 }
 
@@ -509,12 +505,12 @@ function showPage(name, { persist = true, checkUpdate = false } = {}) {
   }
   // 老版本的「签到中心」菜单键是 `plugin:<pack>:checkin`（那时页面在插件包里）。
   // 升级后那条申报被内置页接管、不再注册，于是 localStorage 里存的这个键会
-  // 认不出来 —— 用户停在签到页升级完，重启会掉到「报表」。这里把它接上。
+  // 认不出来 —— 用户停在签到页升级完，重启会掉到「账号」。这里把它接上。
   let target = name;
   if (typeof target === 'string' && target.startsWith(PLUGIN_PAGE_PREFIX) && target.endsWith(':checkin')) {
     target = 'checkin';
   }
-  const page = PAGES.includes(target) ? target : 'overview';
+  const page = PAGES.includes(target) ? target : 'accounts';
   currentPage = page;
   // 离开插件页时把宿主容器清空：iframe 里的页面会一直跑着定时器，
   // 留着等于在后台持续打网关
@@ -537,15 +533,6 @@ function showPage(name, { persist = true, checkUpdate = false } = {}) {
   // 不收起的话，切页之后它会孤零零地浮在新页面上。它自己不认识「页面」，
   // 由切页这一处统一告诉它。
   window.wbColSettings?.close?.();
-  // 切到 AI 助手页时唤醒会话（岛的初始化可能晚于首屏的 showPage —— 它要等
-  // islands/ui.js 加载完；activate 自己判重，早调晚调都只初始化一次）
-  if (page === 'assistant') {
-    window.wbAssistant?.activate?.();
-  }
-  // 切到报表页时拉一次统计（面板内部自持时间范围与数据，这里只做转发）
-  if (page === 'overview') {
-    window.wbReport?.load?.();
-  }
   // 切到日志页时清掉未读标记，并立即拉一次最新日志
   if (page === 'logs') {
     clearLogsBadge();
@@ -592,21 +579,9 @@ function showPage(name, { persist = true, checkUpdate = false } = {}) {
   if (page === 'agent') {
     void window.wbAgentPanel?.load?.();
   }
-  // 网络代理页自持清单（代理池），切进去时拉一次最新：别的窗口 / 别的页面
-  // （账号弹窗里改过引用）都可能让它变过。面板内部保证「这次刷新一定落地」
-  if (page === 'proxies') {
-    window.wbProxiesPanel?.activate?.();
-    void window.wbProxiesPanel?.load?.();
-  }
   // 网关 Key 页持有数据，切进去时拉一次最新（模型管理页在上面已经拉过）
   if (page === 'keys') {
     window.wbKeysPanel?.load?.();
-  }
-  // 文档页显示的是网关地址：切进去时补一次端口同步 —— 端口只在
-  // getBackendStatus 的返回里，render() 那一轮之外的变动（用户换了端口重启）
-  // 到这页才被发现的话，页面上会先显示一段过时的地址，而它就等着被复制
-  if (page === 'docs') {
-    void window.wbPortPanel?.sync?.();
   }
   renderTopbarStatus();
   // 导航项上的内容随页面变：日志未读徽标交给日志面板，更新提示在这里重画
@@ -621,11 +596,9 @@ function showPage(name, { persist = true, checkUpdate = false } = {}) {
 
 /** 顶栏右侧状态区：随当前页给出该页最关心的两三个状态 */
 function renderTopbarStatus() {
-  const session = state?.session || {};
   const accounts = state?.accounts?.accounts || [];
   const summary = state?.accounts?.summary;
   const enabled = summary?.enabled ?? accounts.filter(account => account.enabled !== false).length;
-  const available = summary?.available ?? accounts.filter(account => account.enabled !== false && account.available !== false).length;
   const modelApi = window.wbAccountsModel;
   const isLimited = modelApi?.isLimited || modelApi?.isRateLimited;
   const limited = summary?.limited ?? (isLimited ? accounts.filter(account => account.enabled !== false && isLimited(account)).length : 0);
@@ -643,14 +616,12 @@ function renderTopbarStatus() {
     accounts: () => [chip(wbI18n.t("{n} 个启用", { n: enabled }), enabled ? "ok" : ""), ...(limited ? [chip(wbI18n.t("{n} 个已限流", { n: limited }), "warn")] : [])],
     gateway: () => [chip(ready ? isWebPanel() ? wbI18n.t("网关运行中") : wbI18n.t("监听 127.0.0.1") : wbI18n.t("未就绪"), ready ? "ok" : "bad"), chip(port, "", true)],
     keys: () => mirror("keys-status"),
-    docs: () => [gateway(), chip(port, "", true)],
     logs: () => mirror("logs-badge"),
     requests: () => mirror("req-badge"),
     tasks: () => [gateway(true)],
     settings: () => [gateway(true), ...(enabled ? [chip(wbI18n.t("{n} 个账号启用", { n: enabled }))] : [])],
-    overview: () => [gateway(), available ? chip(wbI18n.t("{n} 个账号可用", { n: available }), "ok") : chip(session.loggedIn ? wbI18n.t("已登录") : wbI18n.t("未登录"), session.loggedIn ? "ok" : "warn")],
   };
-  const items = views[currentPage]?.() || views.overview();
+  const items = views[currentPage]?.() || views.accounts();
   // 启动期的历史统计整理在后台跑（见后端 start_background_maintenance）：
   // 顶栏挂一条轻提示，下一次 20 秒轮询读到 running=false 时自然消失。
   if (state?.maintenance?.running) {
@@ -1328,7 +1299,7 @@ window.wbApp = {
 // 第一个可见页。一个菜单都不剩时保持原值（那种情况下用户会看到侧边栏的提示语，
 // 页面本身仍是可用的，没必要再猜一个）。
 function restoredPage() {
-  const saved = localStorage.getItem(PAGE_KEY) || 'overview';
+  const saved = localStorage.getItem(PAGE_KEY) || 'accounts';
   const api = sidebarApi();
   const layout = api?.readLayout?.();
   if (!layout || !api) return saved;

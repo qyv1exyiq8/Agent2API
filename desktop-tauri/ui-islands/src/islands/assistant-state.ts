@@ -75,15 +75,6 @@ export type AssistantConfig = {
   tools: Record<string, boolean>
 }
 
-/**
- * 从壳的桥组装**对外可请求的模型名列表**（选择器的数据源）。
- *
- * 实现在 `assistant-tools` 里（与 `list_models` 共用同一份合并逻辑）：模型
- * 清单必须把自定义提供商也算进来，否则用户自建上游的模型在助手里选不到。
- * 这里只做转出，保留这个导入名是因为两个页面都按它取数。
- */
-export { loadModelNames } from './assistant-tools'
-
 /** 内置默认系统提示词（与后端 `DEFAULT_SYSTEM_PROMPT` 逐字相同：编辑弹窗里的
  *  「恢复默认」与「当前是否等于默认」都按这份比对） */
 export const DEFAULT_SYSTEM_PROMPT = `你是 Agent2API 的内置助手，帮用户管理本机的模型转发配置。

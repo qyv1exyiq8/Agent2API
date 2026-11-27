@@ -1,4 +1,4 @@
-/* ─────────────────────────────────────────────
+﻿/* ─────────────────────────────────────────────
    移动端卡片化的列名注入（配合 css/mobile.css）
    ─────────────────────────────────────────────
    mobile.css 把表格行 / 请求行拆成 grid 卡片，用 td::before / span::before
@@ -10,7 +10,7 @@
    每次页面渲染 / 刷新后重跑（监听所有 .page 子树，60ms 合并连续触发）。
 
    两张来源都有的表（模型管理 / 网关 Key / 账号）用 data-col 做精确匹配；
-   没有 data-col 的表（网络代理）按位置兜底 —— th[i] 的文字写进 td[i]。
+   没有 data-col 的表按位置兜底 —— th[i] 的文字写进 td[i]。
    列设置隐藏一列时会把 th 与 td 一起从 DOM 摘掉，位置序号仍然对齐。
    ───────────────────────────────────────────── */
 (() => {
@@ -34,7 +34,7 @@
     return el.getAttribute('data-col');
   }
 
-  /* ─── 表格（.acct-table / .models-table / .keys-table / 代理表）─── */
+  /* ─── 表格（.acct-table / .models-table / .keys-table）─── */
   function paintTable(table) {
     const ths = [...table.querySelectorAll('thead th')];
     if (!ths.length) return;
@@ -47,9 +47,9 @@
         if (k) map.set(k, labelOf(th));
       });
     }
-    // 判据要问「这张表有没有可写的标签」，不能问「有没有 key」：网络代理页与
-    // 订阅表的表头一个 data-col 都没有（它们走下面按列序兜底那一支），只看 hasKey
-    // 会让这两张表整表跳过 —— 卡片化之后每个格子上方只剩一条空标签，列名全丢。
+    // 判据要问「这张表有没有可写的标签」，不能问「有没有 key」：有些表
+    // 表头一个 data-col 都没有（它们走下面按列序兜底那一支），只看 hasKey
+    // 会让这类表整表跳过 —— 卡片化之后每个格子上方只剩一条空标签，列名全丢。
     if (!hasKey && !ths.some(th => labelOf(th))) return;
 
     table.querySelectorAll('tbody tr').forEach(tr => {

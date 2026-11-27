@@ -61,7 +61,7 @@
    * 复用**各面板已有的加载入口**，不另造一套刷新：
    *   · `wbApp.refresh()` 是主界面的整体刷新（重拉 /api/session 并重绘账号列表、
    *     导航计数、顶栏状态）—— 账号是这次迁移最要紧的一块（没升级时它一直空着）；
-   *   · 各页自持数据（日志 / 请求记录 / 报表 / 设置里的存储概况 / 脱敏词表）
+   *   · 各页自持数据（日志 / 请求记录 / 设置里的存储概况 / 脱敏词表）
    *     由各自的 `load()` 重拉，它们是迁移直接改动的数据源。
    * 全部用可选链：某个面板还没执行到（脚本顺序）或不在当前页时跳过，
    * 绝不让一次刷新把升级结果的展示拖崩。
@@ -70,7 +70,6 @@
     await wbApp.refresh?.();
     void window.wbLogsPanel?.load?.();
     void window.wbRequestsPanel?.load?.();
-    void window.wbReport?.load?.();
     void window.wbSettingsPanel?.load?.();
   }
 

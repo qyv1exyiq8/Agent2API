@@ -87,21 +87,6 @@
 
 .sponsor-provider-card { grid-column: 1 / -1; }
 .acct-add-form-dialog [data-slot='dialog-section'] > .sponsor-card { margin: 12px 0; }
-.sponsor-proxy-cards { display: flex; min-width: 0; flex-direction: column; gap: 10px; }
-.sponsor-proxy-cards--compact { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.sponsor-proxy-cards--compact .sponsor-card-content { height: 100%; gap: 6px; padding: 10px 12px; }
-.sponsor-proxy-cards--compact .sponsor-card-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; }
-.sponsor-proxy-cards--compact .sponsor-card-logo { height: 20px; }
-.sponsor-proxy-cards--compact .sponsor-wordmark { width: 88px; height: 18px; }
-.sponsor-proxy-cards--compact .sponsor-card-title { grid-column: 1 / -1; grid-row: 2; font-size: 12px; }
-.sponsor-proxy-cards--compact .sponsor-card-label { grid-column: 2; grid-row: 1; justify-self: end; }
-.sponsor-proxy-cards--compact .sponsor-card-description { font-size: 11.5px; line-height: 1.6; }
-.sponsor-proxy-cards--compact .sponsor-card-actions { margin-top: auto; }
-.sponsor-proxy-cards--compact .sponsor-card-link { min-height: 24px; font-size: 11.5px; }
-
-@media (max-width: 560px) {
-  .sponsor-proxy-cards--compact { grid-template-columns: minmax(0, 1fr); }
-}
 
 @keyframes sponsor-gold-border {
   to { --sponsor-angle: 360deg; }

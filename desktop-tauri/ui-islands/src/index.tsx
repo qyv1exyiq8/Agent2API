@@ -28,9 +28,9 @@ observeInputs()
 // 再派发相同页面时，island-lazy 对已挂载的入口是幂等的。
 const initialPage = (() => {
   try {
-    return localStorage.getItem('workbuddy-desktop-page') || 'overview'
+    return localStorage.getItem('workbuddy-desktop-page') || 'accounts'
   } catch {
-    return 'overview'
+    return 'accounts'
   }
 })()
 window.dispatchEvent(new CustomEvent('wb:page', { detail: initialPage }))
