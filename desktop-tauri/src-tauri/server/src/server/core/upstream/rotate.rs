@@ -510,6 +510,9 @@ pub(super) fn scoped_accounts(
         crate::server::core::routing_scope::apply_accounts(&accounts, model)
     };
     let keys = routing::CooldownKeys::new(model);
+    // 池冷却按「池 × 上游真名」缓存：同池往往挂多个账号，逐账号查库会把同一条
+    // KV 读 N 遍（一个请求的选路热路径）。这里每个不同键只查一次。
+    let mut pool_cache: HashMap<(String, String), Option<Value>> = HashMap::new();
     let accounts: Vec<Value> = accounts.into_iter().map(|mut account| {
         let provider = provider_of(&account).to_string();
         if let Some(entry) = service.store.policy_cooldown_for(&provider, &keys.for_account(&account)) {
@@ -519,7 +522,11 @@ pub(super) fn scoped_accounts(
         // 与 providerCooldown 同口径读取。没有 quotaPool 字段的账号零行为变化。
         if let Some(pool) = routing::quota_pool_of(&account) {
             let wire = keys.for_account(&account);
-            if let Some(entry) = service.store.pool_cooldown_for(pool, &wire) {
+            let entry = pool_cache
+                .entry((pool.to_string(), wire.clone()))
+                .or_insert_with(|| service.store.pool_cooldown_for(pool, &wire))
+                .clone();
+            if let Some(entry) = entry {
                 account["quotaPoolCooldown"] = entry;
             }
         }
@@ -593,6 +600,33 @@ pub(super) fn with_proxy_notice(
 /// `model` 必须是**上游实际收到的真名**（不是客户端请求名）—— 调用方从
 /// `SendBody::wire_model` 取（见 `upstream::payload`）。传请求名会把冷却写在
 /// 上游永远不会记额度的键上，判定侧也就查不到它（见 `routing::CooldownKeys`）。
+/// 这次失败是否该让**整个共享配额池**一起冷却。
+///
+/// 只认「额度真的没了」的情形：
+///   - `Quota`（额度耗尽）与 `Balance`（余额不足）必然影响同池所有账号；
+///   - `RateLimit` 只有上游明确说整个 provider 都限流（`scope = Provider`）时才算 ——
+///     普通单账号的 429 多是该 key 的 RPM 突发，把整池停 10 分钟反而是误伤。
+pub(super) fn pool_should_cool(
+    kind: crate::server::config::error_policy::ErrorKind,
+    scope: crate::server::config::error_policy::CooldownScope,
+) -> bool {
+    use crate::server::config::error_policy::{CooldownScope, ErrorKind};
+    match kind {
+        ErrorKind::Quota | ErrorKind::Balance => true,
+        ErrorKind::RateLimit => scope == CooldownScope::Provider,
+        _ => false,
+    }
+}
+
+/// 让某个账号所属的共享配额池对该模型一起冷却（账号没有 `quotaPool` 时什么都不做）。
+///
+/// 生产路径的唯一入口是 `error_policy_finish::finish_failure`（额度类失败落盘后调用）；
+/// `mark_account_limited` 也复用同一份实现，保证两条路径口径一致。
+pub(super) fn cool_pool_for_account(service: &UpstreamService, account: &Value, model: &str, reset_at: Option<i64>) {
+    let Some(pool) = routing::quota_pool_of(account).map(str::to_string) else { return };
+    crate::server::core::blocking::in_place(|| service.store.cool_pool(&pool, model, reset_at));
+}
+
 pub(super) fn mark_account_limited(
     service: &UpstreamService,
     account_id: &str,
@@ -621,9 +655,8 @@ pub(super) fn mark_account_limited(
     // 共享配额池：这个账号属于某个池时，让整池一起短暂冷却，避免后续请求
     // 按优先级逐个去撞同一个已空掉的池（历史事故：11 个同池账号被逐个撞完）。
     // 读账号的 quotaPool 与写入池冷却都走 blocking 内核，不与异步锁打架。
-    if let Some(pool) = service.store.route_account(account_id)
-        .as_deref().and_then(routing::quota_pool_of).map(str::to_string) {
-        crate::server::core::blocking::in_place(|| service.store.cool_pool(&pool, model, if parsed > 0 { Some(parsed) } else { None }));
+    if let Some(account) = service.store.route_account(account_id) {
+        cool_pool_for_account(service, &account, model, if parsed > 0 { Some(parsed) } else { None });
     }
     match entry {
         Some(entry) => {
@@ -902,9 +935,28 @@ pub(super) fn report_limit_event(
 
 #[cfg(test)]
 mod tests {
-    use super::earliest_limit_reset_at_in;
+    use super::{earliest_limit_reset_at_in, pool_should_cool};
+    use crate::server::config::error_policy::{CooldownScope, ErrorKind};
     use crate::server::core::routing::CooldownKeys;
     use serde_json::json;
+
+    /// 池冷却的触发闸门：只有「额度真的没了」才整池冷，普通单账号 429 不冷整池。
+    #[test]
+    fn only_quota_class_failures_cool_the_whole_pool() {
+        // 额度耗尽 / 余额不足：必然影响同池所有账号
+        assert!(pool_should_cool(ErrorKind::Quota, CooldownScope::Model));
+        assert!(pool_should_cool(ErrorKind::Quota, CooldownScope::Account));
+        assert!(pool_should_cool(ErrorKind::Balance, CooldownScope::Model));
+        // 上游明确说整个 provider 都限流：也算池级
+        assert!(pool_should_cool(ErrorKind::RateLimit, CooldownScope::Provider));
+        // 普通单账号 429（RPM 突发）→ 只冷这个账号，不误伤整池
+        assert!(!pool_should_cool(ErrorKind::RateLimit, CooldownScope::Model));
+        assert!(!pool_should_cool(ErrorKind::RateLimit, CooldownScope::Account));
+        // 认证/瞬时/内容类与额度无关，不该冷池
+        for kind in [ErrorKind::Auth, ErrorKind::Transient, ErrorKind::Content, ErrorKind::Unknown] {
+            assert!(!pool_should_cool(kind, CooldownScope::Provider), "{kind:?} 不该冷池");
+        }
+    }
 
     /// 造一条带限额冷却的账号记录（形状与 `mark_rate_limited` 落盘的一致）
     fn limited(id: &str, provider: &str, model: &str, reset_at: i64) -> serde_json::Value {

@@ -83,6 +83,13 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
             let reset = entry["resetAt"].as_i64().unwrap_or(0);
             if reset > logging::now_ms() { error.retry_after_secs = Some(reset.saturating_sub(logging::now_ms()).max(0) as u64 / 1000 + 1); }
             ctx.telemetry.note_error_policy(json!({ "resetAt": entry["resetAt"], "timeSource": entry["timeSource"] }));
+            // 共享配额池：额度真的耗尽时让整池对该模型一起冷却，避免后续请求
+            // 按优先级逐个去撞同一个已空掉的池（取舍见 `rotate::pool_should_cool`）。
+            if rotate::pool_should_cool(decision.kind, decision.scope) {
+                if let Some(account_value) = target.account.as_ref() {
+                    rotate::cool_pool_for_account(service, account_value, &model, Some(reset));
+                }
+            }
         }
         if !decision.deprioritizes() && matches!(decision.kind, ErrorKind::RateLimit | ErrorKind::Quota) && settings.sink && ctx.pinned_account.is_none() {
             service.route.sink_mark_for(account, logging::now_ms(), settings.sink_seconds);
