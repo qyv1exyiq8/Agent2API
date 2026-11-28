@@ -1037,6 +1037,7 @@ async fn forward_round_with(
             pinned_account: None,
             ignore_model_gate: false,
             proxy_override: None,
+            intent_call: false,
         })
         .await
 }

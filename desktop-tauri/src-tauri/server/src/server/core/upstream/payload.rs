@@ -80,6 +80,11 @@ pub(super) struct ProviderContext<'a> {
     pub vision: Option<Arc<super::vision_compat::RequestVision>>,
     pub direct_provider: Option<String>,
     pub direct_model: Option<String>,
+    /// 这是**意图分类器**自己的那一次调用（不是用户的请求）。
+    ///
+    /// 分类失败**不写冷却、不记成功率** —— 分类器是网关的辅助判断，它的失败
+    /// 不该把用户的账号冷掉（那会让一次分类失败连累后续所有用户请求）。
+    pub intent_call: bool,
     /// 网关确认并改写的压缩请求；入站伪造标记已在模型解析时剥离。
     pub compact_routed: bool,
     pub title_routed: bool,

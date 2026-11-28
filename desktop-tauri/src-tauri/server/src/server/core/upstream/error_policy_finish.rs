@@ -74,10 +74,20 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     if decision.hard_stop || ctx.telemetry.is_cancelled() { return false; }
     // 成功率记账（选路「软降级」的输入）：只有真实失败才算 —— 取消/硬停不计，
     // 否则一次客户端断开就会把一个好账号的分数拖下去。
-    if let Some(account) = target.account_id.as_deref() {
+    //
+    // 分类器调用**不计**：它是网关的辅助判断，失败不该拖低用户账号的分数。
+    if let Some(account) = target.account_id.as_deref().filter(|_| !ctx.intent_call) {
         service.route.score_record(account, false);
     }
-    if let Some(account) = target.account_id.as_deref() {
+    // 冷却写入：分类器调用**不写**。
+    //
+    // 分类器是网关的辅助判断，它失败（比如上游排队、模型临时不可用）不该把
+    // 用户的账号冷掉 —— 那会让「一次分类没成」变成「后续所有用户请求都绕开
+    // 这个账号」，故障被放大成用户可见的问题。
+    //
+    // 注意：分类器**用的那个账号**如果真的额度耗尽，冷却它是对的 —— 但那要
+    // 由**用户请求**用到它时自然发生，不需要分类器替它决定。
+    if let Some(account) = target.account_id.as_deref().filter(|_| !ctx.intent_call) {
         if decision.deprioritizes() {
             let until = service.route.deprioritize_mark_scoped(account, &target.provider, &model, decision.scope, &decision.rule, logging::now_ms());
             if until > logging::now_ms() {

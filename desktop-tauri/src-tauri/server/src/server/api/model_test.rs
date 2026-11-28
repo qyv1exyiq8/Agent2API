@@ -734,6 +734,7 @@ async fn run_forward(
         ignore_model_gate: true,
         // 本次测试临时指定的出网代理 / 直连（None = 跟随账号自身配置）
         proxy_override,
+        intent_call: false,
     });
     // 总预算套在整段转发之外（含流式聚合）：测试是一次弹窗等待，必须有上界，
     // 否则一个卡住的上游会让弹窗一直转圈（见 TEST_TIMEOUT）

@@ -83,7 +83,14 @@ impl RequestTelemetry {
     /// 与特殊请求路由的改写记录（`compactRoute` / `titleRoute`）。它们在选路
     /// 之前就已确定，而选路会在每轮重试时整份覆盖 —— 不在这里搬过去，
     /// 回放页就只剩最后一次的选路结果，看不到「这条请求被改写过模型」。
-    const PRESERVED: &'static [&'static str] = &["visionCompatibility", "compactRoute", "titleRoute", "errorPolicyConfig"];
+    /// 整体替换路由快照时**要保留**的键。
+    ///
+    /// 路由快照会被多次整体替换（选路 → 错误策略 → 冷却…），每次替换都带上
+    /// 这些「与本次请求相关但不由本次替换决定」的字段。`intent` 在列：意图分类
+    /// 的结果是在选路**之前**算出来的，后面几次替换不能把它冲掉（实测踩过：
+    /// 分类确实生效、候选确实收窄了，但快照里没有 intent，排查时完全看不出
+    /// 分类发生过）。
+    const PRESERVED: &'static [&'static str] = &["visionCompatibility", "compactRoute", "titleRoute", "errorPolicyConfig", "intent"];
 
     pub fn set_route_decision(&self, mut decision: Value) {
         let mut guard = self.lock();

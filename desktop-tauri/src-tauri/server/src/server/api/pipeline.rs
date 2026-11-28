@@ -194,6 +194,12 @@ fn resolve_model_for(
         object.remove(crate::server::core::compact_routing::ROUTE_FIELD);
         object.remove("_wb_route_group_id");
         object.remove("_wb_route_continue");
+        // 意图档位是网关自己判出来的 —— 客户端不能自己指定（否则能白嫖高档模型）。
+        // 这一层清的是**入站**伪造；网关判出的那一份在 `resolve_client_model`
+        // 之后才写进来（见 `api::request_prepare`）。
+        object.remove(crate::server::core::intent_router::FIELD_LEVEL);
+        object.remove(crate::server::core::intent_router::FIELD_FAILED);
+        object.remove(crate::server::core::intent_router::FIELD_MEMBER);
     }
     let requested = model_field_text(payload);
     // 客户端是否**点名**了模型：默认值注入后这个事实就丢了，先记下来

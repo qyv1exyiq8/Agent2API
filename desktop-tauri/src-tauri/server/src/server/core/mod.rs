@@ -129,6 +129,7 @@ pub mod proxy_rotate;
 pub mod proxy_settings;
 pub mod proxies;
 pub mod routing;
+pub(crate) mod intent_router;
 pub(crate) mod routing_groups;
 pub mod routing_order;
 pub mod routing_scope;

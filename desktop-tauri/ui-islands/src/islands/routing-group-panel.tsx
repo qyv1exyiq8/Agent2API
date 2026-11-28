@@ -11,6 +11,7 @@ import { RoutingActions } from './routing-canvas-controls'
 import { RoutingCanvasLayout, RoutingDraftFooter, RoutingRefreshError } from './routing-canvas-layout'
 import { useRoutingCanvasActivity } from './routing-canvas-activity'
 import { RoutingMemberCard } from './routing-member-card'
+import { RoutingIntentEditor } from './routing-intent-editor'
 import { routingAccountSections, routingCollapsedSections, useRoutingExpansion } from './routing-account-sections'
 import { IconButton, RouteIcon } from './routing-ui'
 import { notify, type RouteGroup, type RouteMember, type RoutingWorkspace } from './routing-types'
@@ -133,6 +134,7 @@ export function RoutingGroupPanel({ editor, accounts, lastUsed, reserved, baseUr
               options={[[ 'auto', t('自动') ], ['session', t('会话内')], ['turn', t('每轮')], ['off', t('已停用')]]} onChange={value => update(next => { next.sticky = value })} /></div>
           </div>
           <p className='routing-config-note'>{group.sticky === 'auto' || group.sticky === 'session' ? t('同一会话优先保持模型与账号，不可用时才顺延。') : t('每轮重新选路，不保留跨请求的账号绑定。')}</p>
+          <RoutingIntentEditor group={group} locked={locked} update={update} />
           <Button variant='link' size='sm' className='routing-group-example' onClick={() => setDialog('example')}>{t('调用示例')}</Button>
         </div>
         <RoutingDraftFooter dirty={dirty} busy={editor.busy} disabled={locked} error={editor.error} onDiscard={editor.discard} onSave={() => void editor.save()} />

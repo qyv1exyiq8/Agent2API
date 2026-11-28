@@ -499,6 +499,7 @@ pub(super) async fn execute_with_telemetry(
         pinned_account: None,
         ignore_model_gate: false,
         proxy_override: None,
+        intent_call: false,
     };
     let work = async {
         let result = match operation {

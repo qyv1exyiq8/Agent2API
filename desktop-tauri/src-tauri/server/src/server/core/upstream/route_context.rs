@@ -73,6 +73,18 @@ impl RequestRouting {
                             && continuation.get("model").and_then(Value::as_str) == routing_groups::candidate_model(account)
                     });
                 }
+                // 意图分类请求：候选收窄到「分类器那个成员」的**全部**账号。
+                //
+                // 不钉死单个账号（`_wb_route_continue`）—— 那样会挑中恰好在冷却的
+                // 那个账号，分类器自己被挡在门外（实测踩过）。按成员过滤则哪个
+                // 账号能用就用哪个。
+                if let Some(member) = body.get(crate::server::core::intent_router::FIELD_MEMBER)
+                    .and_then(Value::as_str)
+                {
+                    routing.group_projection.accounts.retain(|account| {
+                        account.get("routingMemberId").and_then(Value::as_str) == Some(member)
+                    });
+                }
                 routing.settings = group.settings(base);
                 routing.profile = Some(group.profile());
                 routing.scope = group.model.clone();
@@ -80,6 +92,35 @@ impl RequestRouting {
             }
         }
         Ok(routing)
+    }
+
+    /// 按**成员 id** 收窄路由组的候选（意图分类命中后用）。
+    ///
+    /// 只在**路由组**下有意义（候选带 `routingMemberId`）。非路由组时原样
+    /// 返回 —— 意图分类是路由组的能力。
+    ///
+    /// ── 收窄后为空怎么办 ──────────────────────────────────────
+    /// **不清空**。分类器说「这一档」，但那一档的成员恰好都被冷却/停用时，
+    /// 清空会让请求直接 503 —— 而正确做法是退回原候选继续走（自愈优先于
+    /// 分类结果）。所以这里只在**筛完还有东西**时才收窄。
+    pub fn narrow_to_members(&mut self, member_ids: &[String]) {
+        if self.group.is_none() || member_ids.is_empty() {
+            return;
+        }
+        let allowed: std::collections::HashSet<&str> = member_ids.iter().map(|id| id.as_str()).collect();
+        let kept: Vec<Value> = self.group_projection.accounts.iter()
+            .filter(|account| account.get("routingMemberId").and_then(Value::as_str)
+                .is_some_and(|id| allowed.contains(id)))
+            .cloned().collect();
+        // 筛完空了 → 保留原候选（见上面的说明）
+        if !kept.is_empty() {
+            self.group_projection.accounts = kept;
+        }
+    }
+
+    /// 路由组的意图分类配置（没有路由组或没配就返回 None）。
+    pub fn intent_classifier(&self) -> Option<&config::routing_groups::IntentClassifier> {
+        self.group.as_ref().and_then(|group| group.intent.as_ref())
     }
 
     pub fn providers(&self, available: Vec<String>) -> Vec<String> {

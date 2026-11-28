@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::server::config::{compact_routes, title_routes};
+use crate::server::logging;
 use crate::server::core::{blocking, compact_routing, title_routing};
 use crate::server::core::key_scope::KeyScope;
 use crate::server::errors::GatewayError;
@@ -38,15 +39,66 @@ pub(super) async fn resolve_client_model(
     scope: Option<&KeyScope>,
     special: SpecialRoute,
 ) -> Result<String, GatewayError> {
-    let state = state.clone();
+    // 闭包要 'static 所有权（blocking::run 把它交给别的线程），所以 clone 一份。
+    // 分类那一步也要用 state —— 用**原始引用**那份（下面的 `state` 参数仍可用）。
+    let owned = state.clone();
     let scope = scope.cloned();
     let mut body = std::mem::take(payload);
     let (body, result) = blocking::run(move || {
-        let result = resolve_chat_model(&state, &mut body, scope.as_ref(), special);
+        let result = resolve_chat_model(&owned, &mut body, scope.as_ref(), special);
         (body, result)
     }).await?;
     *payload = body;
-    result
+    let model = result?;
+    // ── 意图分类 ────────────────────────────────────────────────
+    // 路由组配了「意图分类」时，先问一次分类器「这条消息有多难」，把命中的
+    // 档位写进内部字段；转发层据此收窄候选（见 `core::upstream::mod`）。
+    //
+    // 放在这里（api 层）而不是转发层：分类器调用与用户请求的转发是两次
+    // **独立**的转发 —— 放进转发层会形成递归（Rust 的 async fn 递归还要装箱，
+    // 而且语义上也不该让一次请求的转发里再发起一次转发）。
+    //
+    // 失败语义：**任何**失败都不分类，按原候选走。分类器是优化，不是依赖 ——
+    // 它坏了不能拖垮用户请求。
+    if let Some(level) = classify_intent(&state, payload).await {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(crate::server::core::intent_router::FIELD_LEVEL.into(), level.into());
+        }
+    }
+    Ok(model)
+}
+
+/// 跑一次意图分类；返回命中的档位 id。
+///
+/// 任何一步失败都返回 None（不分类）—— 调用方据此按原候选走。
+async fn classify_intent(state: &ServerState, payload: &Value) -> Option<String> {
+    // 只对**路由组**且配了意图分类的请求分类
+    let model = payload.get("model").and_then(Value::as_str)?;
+    let profiles = crate::server::config::routing_profiles();
+    let Some(group) = profiles.group_for_model(model) else {
+        // 不是路由组 → 不该走到这里（调用方已判过），出声以免静默
+        crate::server::logging::console_line("[Intent]", &format!("模型 {model} 不是路由组，跳过分类"));
+        return None;
+    };
+    let Some(classifier) = group.intent.as_ref() else {
+        crate::server::logging::console_line("[Intent]", &format!("路由组 {model} 没配意图分类，跳过"));
+        return None;
+    };
+    let Some(text) = crate::server::core::intent_router::user_text(payload) else {
+        crate::server::logging::console_line("[Intent]", &format!("路由组 {model} 的请求里没有用户文本，跳过"));
+        return None;
+    };
+    match crate::server::core::intent_router::classify(
+        state.upstream(), classifier, group, &text).await {
+        Ok(verdict) => Some(verdict.level_id),
+        Err(failure) => {
+            // 失败要**说得清是哪一步**、为什么 —— 否则线上只能看到「没分类」，
+            // 无从判断是分类器模型不可用、超时，还是回答读不出来。
+            logging::console_line("[Intent]", &format!(
+                "意图分类未生效（{}：{}），按原候选转发", failure.tag(), failure.detail()));
+            None
+        }
+    }
 }
 
 fn resolve_chat_model(

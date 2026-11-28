@@ -74,7 +74,7 @@ async fn summarize(state: &ServerState, id: &str, access: ModelAccess) -> Result
     let mut guard = DisconnectGuard::new(state.request_stats(), telemetry.clone(), started);
     let outcome = state.upstream().forward_assistant(ForwardRequest {
         body, stream: false, dedupe_key: String::new(), client_headers: HeaderMap::new(), telemetry: telemetry.clone(),
-        allowed_providers: access.scope, pinned_account: None, ignore_model_gate: false, proxy_override: None,
+        allowed_providers: access.scope, pinned_account: None, ignore_model_gate: false, proxy_override: None, intent_call: false,
     }).await;
     let mut context = RecordContext { stats: state.request_stats(), telemetry, started_at: started, model: requested,
         client_model: model, client_reasoning: String::new(), status: 200, raw_request: None, raw_response: None, is_test: true, source: access.source };

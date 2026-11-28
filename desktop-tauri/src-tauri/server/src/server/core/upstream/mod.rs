@@ -270,6 +270,17 @@ pub struct ForwardRequest {
     /// - `Some(None)`：本次强制直连（忽略账号绑定的代理，且不回退系统代理）；
     /// - `Some(Some(proxy))`：本次强制走指定代理节点。
     pub proxy_override: Option<Option<ResolvedProxy>>,
+    /// 这是**意图分类器**自己的那一次调用（不是用户的请求）。
+    ///
+    /// ── 它挡掉两件事 ───────────────────────────────────────────
+    /// 1. **递归**：分类器调用也会进本函数，若不加标记，它自己带的路由组可能
+    ///    又配了意图分类 → 无限递归。所以下面判到本标记为真就不再分类。
+    /// 2. **记账污染**：分类器的成败不该算在用户请求头上（分类是网关自己的
+    ///    优化动作）。本标记让路由快照标出「这是分类器调用」。
+    ///
+    /// 真正的 usage 隔离靠**不调 `pipeline::record_entry`** —— 记账在 api 层，
+    /// 转发层本来就不写 usage。
+    pub intent_call: bool,
 }
 
 pub(crate) fn plugin_session_id(headers: &HeaderMap, body: &Value) -> String {
@@ -446,12 +457,35 @@ impl UpstreamService {
             vision_compat::RequestVision::capture(&request.body)?
         } else { None };
         let route_vision = vision.clone();
-        let routing = if let Some(resumed) = &resumed_vision { resumed.routing.clone() } else {
+        let mut routing = if let Some(resumed) = &resumed_vision { resumed.routing.clone() } else {
             crate::server::core::blocking::run(move || {
                 route_context::RequestRouting::capture_request_with_vision(&route_model, &route_store, &route_body, route_scope.as_ref(), ignore_route,
                     route_vision.as_ref().map(|vision| &vision.settings))
             }).await??
         };
+        // ── 意图分类路由（消费方）────────────────────────────────
+        // 分类本身在 **api 层**做（`api::request_prepare::resolve_client_model`
+        // 之后）：那里的分类器调用与用户请求的转发是两次**独立**的转发，
+        // 天然没有递归问题。分类结果通过内部字段 `_wb_intent_level` 传下来，
+        // 这里只负责按它收窄候选。
+        //
+        // 字段缺失 = 没分类（没配、分类失败、或不是路由组）→ 候选原样。
+        if let Some(level_id) = request.body.get(crate::server::core::intent_router::FIELD_LEVEL)
+            .and_then(Value::as_str).map(str::to_string)
+        {
+            if let Some(classifier) = routing.intent_classifier().cloned() {
+                if let Some(level) = classifier.levels.iter().find(|level| level.id == level_id) {
+                    let allowed = crate::server::core::intent_router::allowed_members(level).to_vec();
+                    routing.narrow_to_members(&allowed);
+                    let mut decision = request.telemetry.route_decision().unwrap_or_else(|| json!({}));
+                    decision["intent"] = json!({
+                        "levelId": level.id.clone(),
+                        "members": allowed,
+                    });
+                    request.telemetry.set_route_decision(decision);
+                }
+            }
+        }
         let mut slot = self.begin_slot(&request.dedupe_key, cancel.as_ref()).await;
         // 账号级活跃连接计数：**本请求**的凭证，随选路改绑到实际使用的账号。
         // 建在这里（而不是选路处）是因为它必须活到响应体发完 —— 流式路径由
@@ -474,6 +508,10 @@ impl UpstreamService {
         if let Some(object) = upstream_body.as_object_mut() {
             object.remove("_wb_route_group_id");
             object.remove("_wb_route_continue");
+            // 内部字段不能发给上游（上游不认，还会污染它的参数校验）。
+            object.remove(crate::server::core::intent_router::FIELD_LEVEL);
+            object.remove(crate::server::core::intent_router::FIELD_FAILED);
+            object.remove(crate::server::core::intent_router::FIELD_MEMBER);
         }
         if images.is_none() {
             if let Some(object) = upstream_body.as_object_mut() {
@@ -539,6 +577,7 @@ impl UpstreamService {
             vision,
             direct_provider: resumed_vision.as_ref().map(|resumed| resumed.provider.clone()),
             direct_model: resumed_vision.as_ref().map(|resumed| resumed.model.clone()),
+            intent_call: request.intent_call,
             compact_routed: compact_route.is_some(),
             title_routed: title_route.is_some(),
             stream: request.stream,

@@ -15,7 +15,10 @@ export type RouteProfile = {
   sticky?: string
 }
 export type RouteMember = { id: string; provider: string; model: string; included: boolean; accounts: string[] }
-export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; members: RouteMember[] }
+export type RouteIntentLevel = { id: string; label: string; members: string[] }
+/** 意图分类配置（与后端 `IntentClassifier` 同形）。 */
+export type RouteIntent = { classifierMember: string; timeoutMs: number; cacheMs: number; levels: RouteIntentLevel[] }
+export type RouteGroup = { id: string; name: string; model: string; description: string; strategy: string; sticky: string; members: RouteMember[]; intent?: RouteIntent }
 export type RouteModelChoice = { provider: string; providerLabel: string; model: string; name: string; accountCount: number;
   capabilities: { supportsToolCall?: boolean | null; supportsImages?: boolean | null; supportsVideo?: boolean | null; supportsReasoning?: boolean | null; maxInputTokens?: number | null; maxOutputTokens?: number | null } }
 export type RouteGroups = { groups: Array<{ group: RouteGroup; revision: string }>; newRevision: string; catalog: RouteModelChoice[] }

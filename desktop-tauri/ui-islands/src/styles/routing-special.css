@@ -133,3 +133,74 @@
   gap: 10px;
   font-size: 13px;
 }
+
+/* ── 意图分类配置（路由组面板内）───────────────────────────────────
+   面板只做「配置」：分类由网关在请求开始时自动做，失败自动降级。 */
+.routing-intent {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.routing-intent-off {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.routing-intent-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.routing-intent-levels-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.routing-intent-level {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.routing-intent-level-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.routing-intent-level-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--muted);
+  font-size: 12px;
+}
+
+.routing-intent-level-members {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.routing-intent-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
