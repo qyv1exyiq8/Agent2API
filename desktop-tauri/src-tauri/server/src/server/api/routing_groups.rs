@@ -18,10 +18,23 @@ pub async fn get_groups(State(state): State<ServerState>) -> Response {
     }
 }
 
+/// GET /api/routing/shared-models —— **跨厂同名模型**的发现列表。
+///
+/// 返回被两家以上提供商同时承载的模型（含各家的上游名与账号数）。
+/// 这是「自动同名组」的原料：转发层本来就跨厂容灾，这个接口只是把这件事
+/// **显式化**，让用户能看见并一键成组。
+pub async fn shared_models(State(state): State<ServerState>) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        let store = state.store();
+        json!({ "shared": routing_groups::discover_shared_models(&store) })
+    }).await {
+        Ok(value) => ok_json(value), Err(error) => errors::management_error(500, error.to_string()),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GroupSave { id: String, group: Option<config::RoutingGroup>, revision: String }
-
 pub async fn put_group(State(state): State<ServerState>, body: Bytes) -> Response {
     let payload = match parse_body(&body).and_then(|value| serde_json::from_value::<GroupSave>(value).map_err(|error| errors::GatewayError::bad_request(error.to_string()))) {
         Ok(value) => value, Err(error) => return errors::management_error(400, error.message),

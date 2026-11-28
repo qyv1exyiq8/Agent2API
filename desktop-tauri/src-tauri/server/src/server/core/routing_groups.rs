@@ -86,8 +86,77 @@ pub fn choices(store: &AccountStore) -> Vec<Value> {
     result
 }
 
-pub fn candidate_key(member: &str, account: &str) -> String { format!("{member}\0{account}") }
-pub fn account_key(key: &str) -> &str { key.split_once('\0').map(|(_, account)| account).unwrap_or(key) }
+/// 从「每家有哪些模型」的原始清单里，归并出**跨厂同名**的模型。
+///
+/// 抽成纯函数（输入是 `choices` 的形状），这样归并规则能被单测覆盖 ——
+/// 它是「同名组」的唯一判定逻辑，出错就会把不相干的模型并进一组。
+///
+/// 规则：
+///   - 按模型名**小写**归并（大小写不同的同一个模型算同名）；
+///   - 同一家的多个条目只算一家（同家别名不算「跨厂同名」）；
+///   - 承载家 < 2 的不列（单家模型不是同名组）。
+pub fn group_shared_models(choices: &[Value]) -> Vec<Value> {
+    let mut by_model: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for row in choices {
+        let Some(provider) = row.get("provider").and_then(Value::as_str) else { continue };
+        let Some(model) = row.get("model").and_then(Value::as_str) else { continue };
+        if model.is_empty() { continue; }
+        by_model
+            .entry(model.to_ascii_lowercase())
+            .or_default()
+            .push((provider.to_string(), model.to_string()));
+    }
+    let mut result: Vec<Value> = Vec::new();
+    for (key, mut members) in by_model {
+        members.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        // 同一家只留一条（同家别名不算「跨厂同名」）
+        members.dedup_by(|left, right| left.0 == right.0);
+        if members.len() < 2 { continue; }
+        let providers: Vec<&str> = members.iter().map(|(provider, _)| provider.as_str()).collect();
+        result.push(json!({
+            // 对外名用第一家承载家的原样模型名（小写键只用于归并）
+            "model": members[0].1,
+            "key": key,
+            "providers": providers,
+            "members": members.iter().map(|(provider, model)| json!({
+                "provider": provider,
+                "model": model,
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    // 承载家多的排前面 —— 那是最有值的容灾组
+    result.sort_by(|left, right| {
+        let left_count = left.get("providers").and_then(Value::as_array).map_or(0, Vec::len);
+        let right_count = right.get("providers").and_then(Value::as_array).map_or(0, Vec::len);
+        right_count.cmp(&left_count)
+            .then(left.get("model").and_then(Value::as_str).unwrap_or("").cmp(right.get("model").and_then(Value::as_str).unwrap_or("")))
+    });
+    result
+}
+
+/// **跨厂同名模型**的发现结果：同一个模型名被几家提供商同时承载。
+///
+/// 这就是「自动同名组」（magpie 的 AutoStandIn）的原料：客户端只点一个
+/// 模型名，转发层本来就已跨厂容灾（`route_for_forward` 返回全部承载该模型的
+/// 厂），但用户**看不到**这件事，也没法手动把某几个名字绑成一个组。
+/// 这个发现只做「可见 + 可一键成组」，不改变转发行为。
+pub fn discover_shared_models(store: &AccountStore) -> Vec<Value> {
+    let accounts = store.routing_snapshot();
+    let mut shared = group_shared_models(&choices(store));
+    // 补上各家的账号数与展示名（决定这个组值不值得建）
+    for entry in shared.iter_mut() {
+        let Some(members) = entry.get_mut("members").and_then(Value::as_array_mut) else { continue };
+        for member in members.iter_mut() {
+            let provider = member.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
+            let count = accounts.accounts.iter().filter(|account| routing::provider_of(account) == provider).count();
+            member["accountCount"] = Value::from(count);
+            member["providerLabel"] = Value::from(providers::label_of(&provider));
+        }
+    }
+    shared
+}
+
+pub fn candidate_key(member: &str, account: &str) -> String { format!("{member}\0{account}") }pub fn account_key(key: &str) -> &str { key.split_once('\0').map(|(_, account)| account).unwrap_or(key) }
 pub fn member_key(key: &str) -> Option<&str> { key.split_once('\0').map(|(member, _)| member) }
 pub fn attempt_key(account: &Value) -> String {
     account.get("routingCandidateId").and_then(Value::as_str).unwrap_or_else(|| routing::account_id(account).unwrap_or("")).to_string()
@@ -203,5 +272,108 @@ pub fn append_public(store: &AccountStore, scope: Option<&KeyScope>, data: &mut 
         item["created"] = 0.into();
         item["is_default"] = false.into();
         data.push(item);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn choice(provider: &str, model: &str) -> Value {
+        json!({ "provider": provider, "model": model })
+    }
+
+    /// 只有一家承载的模型不是「同名组」，不该被列出来。
+    #[test]
+    fn single_provider_models_are_not_shared() {
+        let choices = vec![choice("a", "model-x"), choice("a", "model-y")];
+        assert!(group_shared_models(&choices).is_empty());
+    }
+
+    /// 两家承载同名模型 → 归并成一个组，成员各带各家的上游名。
+    #[test]
+    fn same_model_across_providers_becomes_one_group() {
+        let choices = vec![choice("a", "gpt-5"), choice("b", "gpt-5")];
+        let groups = group_shared_models(&choices);
+        assert_eq!(groups.len(), 1);
+        let group = &groups[0];
+        assert_eq!(group.get("model").and_then(Value::as_str), Some("gpt-5"));
+        let providers: Vec<&str> = group.get("providers").and_then(Value::as_array)
+            .expect("providers").iter().map(|v| v.as_str().unwrap_or("")).collect();
+        assert_eq!(providers, vec!["a", "b"]);
+        assert_eq!(group.get("members").and_then(Value::as_array).map(Vec::len), Some(2));
+    }
+
+    /// 大小写不同算同一个模型（上游命名常有大小写差异）。
+    #[test]
+    fn model_names_are_compared_case_insensitively() {
+        let choices = vec![choice("a", "GPT-5"), choice("b", "gpt-5")];
+        assert_eq!(group_shared_models(&choices).len(), 1);
+    }
+
+    /// 同一家多个条目（原生模型 + 别名）只算一家，不构成「跨厂同名」。
+    #[test]
+    fn same_provider_entries_count_once() {
+        let choices = vec![choice("a", "gpt-5"), choice("a", "gpt-5-alias"), choice("b", "gpt-5")];
+        let groups = group_shared_models(&choices);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].get("providers").and_then(Value::as_array).map(Vec::len), Some(2));
+    }
+
+    /// 承载家多的组排前面（最有容灾价值）。
+    #[test]
+    fn groups_with_more_providers_come_first() {
+        let choices = vec![
+            choice("a", "solo"), choice("b", "solo"),
+            choice("a", "tri"), choice("b", "tri"), choice("c", "tri"),
+        ];
+        let groups = group_shared_models(&choices);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].get("model").and_then(Value::as_str), Some("tri"));
+    }
+
+    /// 集成测试：对**真实账号库**跑发现逻辑（临时库 + 两个不同厂商的账号）。
+    ///
+    /// 纯函数测试覆盖了归并规则，这里补一条端到端：账号进库 → 快照读出 →
+    /// `discover_shared_models` 跑通。防止「纯函数对、接线错」。
+    ///
+    /// 不断言具体的模型名：模型清单来自**提供商目录**（各家插件/内置目录），
+    /// 那是运行期数据，测试环境里未必有某款模型。断言的是**结构自洽**与
+    /// 「每组至少两家」——那两条才是这个接口的契约。
+    #[test]
+    fn shared_model_discovery_runs_against_a_real_store() {
+        let (db, _temp) = crate::server::db::test_temp::TempDb::open("shared-models");
+        let store = crate::server::core::account_store::AccountStore::with_db(Some(db));
+        // 账号 id 由 **uid** 派生：两条记录必须带不同的 uid（否则第二次写入
+        // 变成「更新既有账号」，快照里就只剩一条）。uid 放在顶层还是 auth 里
+        // 取决于各家；这里放 auth，与内置家的形状一致。
+        for (provider, uid) in [("workbuddy", "uid-wb"), ("qoder", "uid-qd")] {
+            store.add_account(
+                &json!({ "auth": { "accessToken": format!("token-{uid}") }, "account": { "uid": uid } }),
+                Some(provider),
+                Some(provider),
+            ).expect("账号应当能写入");
+        }
+        // 账号确实进了库（快照能读出来）
+        let snapshot = store.routing_snapshot();
+        let ids: Vec<String> = snapshot.accounts.iter()
+            .map(|account| crate::server::core::routing::provider_of(account).to_string()).collect();
+        assert!(snapshot.accounts.len() >= 2, "两个账号都应当进入选路快照，实际 {ids:?}");
+
+        // 发现接口跑通且结构自洽
+        for entry in discover_shared_models(&store) {
+            assert!(!entry.get("model").and_then(Value::as_str).unwrap_or("").is_empty(),
+                "每组都要有对外模型名");
+            let providers = entry.get("providers").and_then(Value::as_array).expect("providers 必须是数组");
+            assert!(providers.len() >= 2, "同名组至少两家：{providers:?}");
+            let members = entry.get("members").and_then(Value::as_array).expect("members 必须是数组");
+            assert_eq!(members.len(), providers.len(), "成员数与承载家数一致");
+            for member in members {
+                assert!(member.get("provider").and_then(Value::as_str).is_some(), "成员要有 provider");
+                assert!(member.get("model").and_then(Value::as_str).is_some(), "成员要有上游模型名");
+                assert!(member.get("accountCount").and_then(Value::as_u64).is_some(), "成员要有账号数");
+            }
+        }
     }
 }

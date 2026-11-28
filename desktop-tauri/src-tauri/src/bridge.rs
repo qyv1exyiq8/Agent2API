@@ -402,6 +402,7 @@ const BRIDGE_JS: &str = r#"
     getRoutingWorkspace: model => call('GET', '/api/routing/workspace' + toQuery({ model })),
     saveRoutingProfile: payload => call('PUT', '/api/routing/profile', payload || {}),
     getRoutingGroups: () => call('GET', '/api/routing/groups'),
+    getRoutingSharedModels: () => call('GET', '/api/routing/shared-models'),
     saveRoutingGroup: payload => call('PUT', '/api/routing/groups', payload),
     previewRouting: payload => call('POST', '/api/routing/preview', payload),
     getRoutingSticky: model => call('GET', '/api/routing/sticky' + toQuery({ model })),

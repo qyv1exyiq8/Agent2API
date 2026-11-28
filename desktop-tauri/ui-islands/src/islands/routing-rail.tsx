@@ -7,7 +7,7 @@ import type { RoutingWorkspace } from './routing-types'
 import { RouteIcon } from './routing-ui'
 
 /** 特殊请求路由的三个入口（与账号路由并列，但规则独立）。 */
-export type SpecialKey = 'compact' | 'vision' | 'title'
+export type SpecialKey = 'compact' | 'vision' | 'title' | 'shared'
 
 /**
  * 三项只留「图标 + 名字」。
@@ -20,6 +20,7 @@ export const SPECIAL_RAIL: Array<{ key: SpecialKey; label: string; icon: string 
   { key: 'compact', label: t('压缩上下文'), icon: 'database' },
   { key: 'vision', label: t('图片兼容'), icon: 'eye' },
   { key: 'title', label: t('标题生成'), icon: 'spark' },
+  { key: 'shared', label: t('同名模型'), icon: 'route' },
 ]
 
 export function RoutingRail({ editor, groups, workspace, onModel, onGroup, onAdd, special, onSpecial, errors = false, errorsDirty = false, onErrors }: {

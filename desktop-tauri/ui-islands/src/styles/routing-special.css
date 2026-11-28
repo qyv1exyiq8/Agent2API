@@ -94,3 +94,42 @@
 }
 .rp-switch-row > span { font-size: 13px; }
 .rp-switch-row > small { margin-left: auto; color: var(--text-3); font-size: 12px; }
+
+/* ── 跨厂同名模型（发现视图）────────────────────────────────────
+   面板只做「看见 + 一键建组」：转发层的跨厂容灾本来就生效，这里把它显式化。 */
+.routing-shared-models {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.routing-shared-model {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.routing-shared-model-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.routing-shared-model-members {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.routing-shared-model-members li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}

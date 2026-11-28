@@ -13,6 +13,7 @@ import { routingErrorsApi } from './routing-errors-api'
 import { RoutingStickyDialog } from './routing-sticky'
 import { RoutingConfigPanel } from './routing-config-panel'
 import { RoutingGroupPanel } from './routing-group-panel'
+import { RoutingSharedModels } from './routing-shared-models'
 import { RoutingCreateDialog } from './routing-create-dialog'
 import { useRouteGroups } from './routing-group-state'
 import { useRoutingAccounts } from './routing-accounts'
@@ -65,7 +66,8 @@ export function RoutingPage() {
   const visionEditor = useSpecialEditor(special.vision, mode === 'config' && specialKey === 'vision')
   const titleEditor = useSpecialEditor(special.title, mode === 'config' && specialKey === 'title')
   const specialEditors = { compact: compactEditor, vision: visionEditor, title: titleEditor } as const
-  const activeSpecial = specialKey ? specialEditors[specialKey] : null
+  // 「同名模型」是发现视图，没有自己的可编辑规则（它只读 + 一键建组），故不在此表内
+  const activeSpecial = specialKey && specialKey !== 'shared' ? specialEditors[specialKey] : null
   const specialDirty = (compactEditor.dirty ? 1 : 0) + (visionEditor.dirty ? 1 : 0) + (titleEditor.dirty ? 1 : 0)
   const dirtyCount = editor.dirtyCount + groups.dirtyCount + specialDirty + Number(errorsDirty)
   const [modal, setModal] = React.useState<
@@ -178,6 +180,8 @@ export function RoutingPage() {
       return
     }
     if (specialKey) {
+      // 「同名模型」是只读发现视图，没有自己的规则草稿可重载 —— 交给它自己刷新
+      if (specialKey === 'shared') { setRefreshToken(value => value + 1); return }
       const current = specialEditors[specialKey]
       if (current.loading || current.saving) return
       if (!current.dirty || await confirmDialog(t('重新读取会丢弃当前范围的未保存草稿，其他范围的草稿保留。'), { title: t('重新读取配置'), confirmText: t('重新读取') })) {
@@ -262,7 +266,8 @@ export function RoutingPage() {
         {errorsOpen ? null : specialKey === 'compact' ? <CompactSpecialPanel editor={compactEditor} /> :
           specialKey === 'vision' ? <VisionSpecialPanel editor={visionEditor} /> :
             specialKey === 'title' ? <TitleSpecialPanel editor={titleEditor} /> :
-              groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
+              specialKey === 'shared' ? <RoutingSharedModels onCreated={() => { void groups.reload() }} /> :
+                groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
                 reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
                 onAccount={accountSettings} sorting={sorting} now={replay.now} onSort={groupSettings} lastUsed={modelLastUsed}
                 refreshToken={replay.refreshToken} paused={pageEditor.busy} onWorkspace={replay.acceptWorkspace} /> :
@@ -271,7 +276,8 @@ export function RoutingPage() {
                   onAccount={accountSettings} onSort={groupSettings}
                   onProtection={() => openErrors('protection')} />}
         {/* 右栏：选中特殊路由时并排显示这条路由最近命中的请求（原型的「配置在左、记录在右」） */}
-        {specialKey ? <RoutingSpecialHits kind={specialKey} refreshToken={refreshToken}
+        {/* 「同名模型」是发现视图，没有对应的请求分类，故不并排显示 */}
+        {specialKey && specialKey !== 'shared' ? <RoutingSpecialHits kind={specialKey} refreshToken={refreshToken}
           onOpenReplay={() => setMode('replay')} /> : null}
       </RoutingConfigShell>
     </div>{mode === 'replay' ? <div className='routing-replay-layout'>

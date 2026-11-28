@@ -167,6 +167,8 @@ export type StickyEntry = {
 }
 export type RoutingBridge = {
   getRoutingGroups(): Promise<RouteGroups>
+  /** 跨厂同名模型的发现列表（后端 `discover_shared_models`） */
+  getRoutingSharedModels(): Promise<{ shared: import('./routing-shared-models').SharedModel[] }>
   saveRoutingGroup(payload: { id: string; group: RouteGroup | null; revision: string }): Promise<RouteGroups>
   previewRouting(payload: RoutePreviewInput): Promise<RoutePreview>
   getRoutingWorkspace(model?: string): Promise<RoutingWorkspace>
