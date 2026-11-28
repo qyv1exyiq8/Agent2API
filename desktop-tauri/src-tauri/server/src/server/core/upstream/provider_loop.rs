@@ -2531,9 +2531,14 @@ async fn cap_cleared(
     let store = service.store.clone();
     let id = account_id.to_string();
     let wire_model = model.to_string();
+    // 共享配额池：先取该账号所属池（闭包 move 之前读，避免把借用的 target 带进去）
+    let pool = target.account.as_ref().and_then(crate::server::core::routing::quota_pool_of).map(str::to_string);
     let cleared = crate::server::core::blocking::run(move || {
         store.clear_policy_cooldown(&id, &wire_model);
-        store.clear_rate_limit(&id, &wire_model)
+        let ok = store.clear_rate_limit(&id, &wire_model);
+        // 账号恢复即证明池当前可用，提前解除整池冷却
+        if let Some(pool) = pool { store.clear_pool(&pool, &wire_model); }
+        ok
     }).await;
     if !matches!(cleared, Ok(true)) {
         return;

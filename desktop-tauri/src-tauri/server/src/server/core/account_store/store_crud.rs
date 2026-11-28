@@ -706,10 +706,11 @@ impl AccountStore {
     }
 
     /// 新建账号表单可能附带的账号级设置字段（不参与提供商凭证归一化）。
-    pub(crate) const INITIAL_SETTING_KEYS: [&'static str; 6] = [
+    pub(crate) const INITIAL_SETTING_KEYS: [&'static str; 7] = [
         "enabled",
         "allowRouteSkip",
         "maxConcurrent",
+        "quotaPool",
         "userAgent",
         "usageQuery",
         "limiterGroups",
@@ -962,6 +963,27 @@ impl AccountStore {
                 } else {
                     record.set("userAgent", Value::String(next.clone()));
                     changes.push(format!("User-Agent → {next}"));
+                }
+            }
+        }
+
+        if let Some(value) = patch.get("quotaPool") {
+            // 共享配额池 id：空串 / null = 不属于任何池（清空）。
+            // 同一池的账号共用一份上游额度：一个撞额度时整池对该模型一起冷却。
+            // 只接受字符串，长度设上限避免脏数据塞进 KV 键。
+            let next = match value {
+                Value::Null => String::new(),
+                Value::String(text) => text.trim().chars().take(64).collect(),
+                _ => return Err(AccountStoreError::bad_request("quotaPool 必须是字符串或 null")),
+            };
+            let current = record.get("quotaPool").and_then(Value::as_str).unwrap_or("").to_string();
+            if next != current {
+                if next.is_empty() {
+                    record.remove("quotaPool");
+                    changes.push("共享配额池 → 无".to_string());
+                } else {
+                    record.set("quotaPool", Value::String(next.clone()));
+                    changes.push(format!("共享配额池 → {next}"));
                 }
             }
         }

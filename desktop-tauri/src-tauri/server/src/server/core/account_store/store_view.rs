@@ -607,6 +607,13 @@ impl AccountStore {
                         record.get("maxConcurrent"),
                     )),
                 );
+                // 共享配额池 id：选路读的公开形态（snapshot::route_account）与这里
+                // 必须是同一份事实，否则池冷却判定读不到用户设置的值。
+                if let Some(pool) = record.get("quotaPool").and_then(Value::as_str) {
+                    if !pool.trim().is_empty() {
+                        fields.insert("quotaPool".to_string(), Value::String(pool.to_string()));
+                    }
+                }
                 fields.insert(
                     "allowRouteSkip".to_string(),
                     Value::Bool(record.get("allowRouteSkip").and_then(Value::as_bool).unwrap_or(true)),

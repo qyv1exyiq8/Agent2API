@@ -161,10 +161,27 @@ pub fn is_rate_limited(account: &Value, keys: &CooldownKeys<'_>, now: i64) -> bo
 /// 冷却键按 [`CooldownKeys`] 解析（真名，不是请求名）。
 pub fn rate_limit_reset_at(account: &Value, keys: &CooldownKeys<'_>, now: i64) -> i64 {
     let key = keys.for_account(account);
-    let keys = [account.pointer("/routingCooldowns/@account/resetAt"), account.pointer("/providerCooldown/resetAt"),
-        account.get("rateLimits").and_then(|limits| limits.get(key.as_str())).and_then(|limit| limit.get("resetAt"))];
-    keys.into_iter().flatten().filter_map(js_number).filter(|reset| *reset > now as f64)
+    let mut all = vec![
+        account.pointer("/routingCooldowns/@account/resetAt"),
+        account.pointer("/providerCooldown/resetAt"),
+        account.get("rateLimits").and_then(|limits| limits.get(key.as_str())).and_then(|limit| limit.get("resetAt")),
+    ];
+    // 共享配额池：同池任一账号撞额度时，整池一起短暂冷却。池级冷却由选路快照
+    // 注入到 `quotaPoolCooldown`（形态同 `providerCooldown`），字段缺失/过期即忽略。
+    let pool = account.get("quotaPoolCooldown").and_then(|entry| entry.get("resetAt"));
+    if pool.is_some() { all.push(pool); }
+    all.into_iter().flatten().filter_map(js_number).filter(|reset| *reset > now as f64)
         .map(|reset| reset as i64).max().unwrap_or(0)
+}
+
+/// 账号声明的共享配额池 id（空串 = 不参与任何池，行为与改造前完全一致）。
+///
+/// 同一 `quotaPool` 下的账号共用一份上游额度：其中一个撞 429/额度耗尽时，
+/// 整池一起短暂冷却，避免请求按优先级逐个去撞同一个已经空掉的池
+/// （历史事故：11 个同池账号一天内被逐个撞完后全部永久沉底）。
+/// 字段缺失、非字符串、空白串都视为「不参与」，保证老账号零行为变化。
+pub fn quota_pool_of(account: &Value) -> Option<&str> {
+    account.get("quotaPool").and_then(Value::as_str).map(str::trim).filter(|pool| !pool.is_empty())
 }
 
 /// 账号是否可用于转发：启用 + 未被该模型限额。
@@ -870,6 +887,47 @@ pub fn sticky_ttl_ms(mode: StickyMode) -> i64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn quota_pool_cooldown_blocks_the_whole_pool_and_expires() {
+        let now = 1_700_000_000_000i64;
+        let keys = CooldownKeys::new("test-model");
+        // A、B 属于同一池；池级冷却注入到两条账号记录上（形态同 providerCooldown）
+        let a = json!({ "id": "a1", "provider": "P", "quotaPool": "shared",
+            "quotaPoolCooldown": { "resetAt": now + 60_000 } });
+        let b = json!({ "id": "a2", "provider": "P", "quotaPool": "shared",
+            "quotaPoolCooldown": { "resetAt": now + 60_000 } });
+        // 冷却期内整池都不可用
+        assert!(rate_limit_reset_at(&a, &keys, now) > 0);
+        assert!(rate_limit_reset_at(&b, &keys, now) > 0);
+        // 到点后整池一起恢复
+        assert_eq!(rate_limit_reset_at(&a, &keys, now + 60_001), 0);
+        assert_eq!(rate_limit_reset_at(&b, &keys, now + 60_001), 0);
+    }
+
+    #[test]
+    fn quota_pool_cooldown_takes_the_latest_of_all_sources() {
+        let now = 1_700_000_000_000i64;
+        let keys = CooldownKeys::new("test-model");
+        // 账号自身冷却 5 分钟、池级冷却 10 分钟 → 取更晚的池级（10 分钟）
+        let account = json!({ "id": "a1", "provider": "P",
+            "rateLimits": { "test-model": { "resetAt": now + 300_000 } },
+            "quotaPoolCooldown": { "resetAt": now + 600_000 } });
+        assert_eq!(rate_limit_reset_at(&account, &keys, now), now + 600_000);
+    }
+
+    #[test]
+    fn quota_pool_absent_means_no_new_behavior() {
+        let now = 1_700_000_000_000i64;
+        let keys = CooldownKeys::new("test-model");
+        // 老账号：没有 quotaPool / quotaPoolCooldown 字段，判定与改造前一致
+        let plain = json!({ "id": "a1", "provider": "P" });
+        assert_eq!(quota_pool_of(&plain), None);
+        assert_eq!(rate_limit_reset_at(&plain, &keys, now), 0);
+        // 空白池名视为不参与
+        let blank = json!({ "id": "a1", "provider": "P", "quotaPool": "  " });
+        assert_eq!(quota_pool_of(&blank), None);
+    }
 
     /// 家内轮询的一份最小 meta：只带各家游标，其余状态为空。
     fn provider_meta<'a>(

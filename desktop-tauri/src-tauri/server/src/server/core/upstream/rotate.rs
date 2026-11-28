@@ -515,6 +515,14 @@ pub(super) fn scoped_accounts(
         if let Some(entry) = service.store.policy_cooldown_for(&provider, &keys.for_account(&account)) {
             account["providerCooldown"] = entry;
         }
+        // 共享配额池：把该账号所属池的冷却注入进来，判定侧（rate_limit_reset_at）
+        // 与 providerCooldown 同口径读取。没有 quotaPool 字段的账号零行为变化。
+        if let Some(pool) = routing::quota_pool_of(&account) {
+            let wire = keys.for_account(&account);
+            if let Some(entry) = service.store.pool_cooldown_for(pool, &wire) {
+                account["quotaPoolCooldown"] = entry;
+            }
+        }
         account
     }).filter(|account| {
         pinned.is_some() || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)
@@ -610,6 +618,13 @@ pub(super) fn mark_account_limited(
         if parsed > 0 { Some(parsed as f64) } else { None },
         message,
     ));
+    // 共享配额池：这个账号属于某个池时，让整池一起短暂冷却，避免后续请求
+    // 按优先级逐个去撞同一个已空掉的池（历史事故：11 个同池账号被逐个撞完）。
+    // 读账号的 quotaPool 与写入池冷却都走 blocking 内核，不与异步锁打架。
+    if let Some(pool) = service.store.route_account(account_id)
+        .as_deref().and_then(routing::quota_pool_of).map(str::to_string) {
+        crate::server::core::blocking::in_place(|| service.store.cool_pool(&pool, model, if parsed > 0 { Some(parsed) } else { None }));
+    }
     match entry {
         Some(entry) => {
             let reset = entry.get("resetAt").and_then(Value::as_f64).unwrap_or(0.0);

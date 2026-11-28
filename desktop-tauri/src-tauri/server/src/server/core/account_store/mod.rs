@@ -120,6 +120,7 @@ mod plugin_public;
 mod plugin_state;
 pub mod priority;
 pub mod qoder_accounts;
+mod quota_pool;
 pub mod raccoon_accounts;
 pub(crate) mod policy_cooldowns;
 pub(crate) mod policy_cooldown_view;
