@@ -759,14 +759,25 @@ pub fn plan_route(
     };
     arranged.sort_by_key(|account| rank_of(account, meta.sunk));
     arranged.sort_by_key(|account| rank_of(account, meta.resting));
-    // 软降级：近期成功率明显偏低（样本足够时由选路快照注入 `routeScore`）的账号
-    // 排到队尾。**只调位次、永不跳过** —— 与熔断（下一层，直接跳过）分工明确：
-    // 偶发失败不该被熔断，但也不该一直占着队首。成功几次后 EWMA 回升即自动复位。
+    // 软降级 + 延迟降级：合并成**一个**排序键（分成两轮独立排序会让后一轮
+    // 覆盖前一轮的顺序 —— `sort_by_key` 稳定，但它排的是整个序列）。两个信号
+    // 都只调位次、**永不跳过**：
+    //   - 成功率明显偏低（样本足够时由选路注入 `routeScore`）→ 排到队尾。
+    //     与熔断（下一层，直接跳过）分工明确：偶发失败不该熔断，但不该一直占队首。
+    //     成功几次后 EWMA 回升即自动复位。
+    //   - 首帧明显慢（`routeLatencyMs`）→ 同样让位。阈值取**绝对值**（15 秒）
+    //     而不是相对中位数：冷启动时只有一个账号有样本，相对阈值会自己和自己比，
+    //     永远判不出慢来。
     arranged.sort_by_key(|account| {
-        account
+        let low_score = account
             .get("routeScore")
             .and_then(Value::as_f64)
-            .is_some_and(|rate| rate < 0.5)
+            .is_some_and(|rate| rate < 0.5);
+        let slow = account
+            .get("routeLatencyMs")
+            .and_then(Value::as_f64)
+            .is_some_and(|ms| ms > 15_000.0);
+        u8::from(low_score) + u8::from(slow)
     });
     // 熔断的账号放在队尾（所有策略一致）：只有全场都打不开时才轮到它试一次
     arranged.sort_by_key(|account| {
@@ -976,6 +987,38 @@ mod tests {
         );
         let ids: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(ids, vec!["good", "unknown", "bad"], "低分账号排最后，但不被丢弃");
+    }
+
+    /// 首帧慢的账号也排到队尾，但同样不被丢弃（与低分同一条规则）。
+    #[test]
+    fn slow_first_frame_accounts_are_deprioritized_but_never_dropped() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Order,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: None,
+        };
+        let accounts = vec![
+            json!({ "id": "fast", "provider": "A", "priority": 100, "routeLatencyMs": 800 }),
+            json!({ "id": "slow", "provider": "A", "priority": 101, "routeLatencyMs": 30000 }),
+        ];
+        let plan = plan_route(
+            &accounts,
+            &CooldownKeys::new("m"),
+            &counts,
+            &[],
+            1_700_000_000_000,
+            &meta,
+        );
+        let ids: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["fast", "slow"], "慢账号排最后，但不被丢弃");
     }
 
     /// 家内轮询的一份最小 meta：只带各家游标，其余状态为空。

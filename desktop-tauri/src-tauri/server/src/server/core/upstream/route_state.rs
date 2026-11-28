@@ -71,7 +71,7 @@ pub(super) const SCORE_MIN_SAMPLES: u64 = 8;
 /// 低分线：低于它才「软降级」排到队尾（阈值选在 0.5 ＝ 一半失败）。
 pub(super) const SCORE_LOW: f64 = 0.5;
 
-/// 一个账号的近期表现（成功率 EWMA）。
+/// 一个账号的近期表现（成功率 EWMA + 延迟 EWMA）。
 ///
 /// 与熔断的区别：熔断是「连续失败到阈值就**跳过**」（二值、会拒服务）；
 /// 这里是「成功率长期偏低就**排到队尾**」（连续、绝不拒服务）。两者互补：
@@ -82,6 +82,8 @@ struct ScoreEntry {
     rate: f64,
     /// 累计样本数（只增，用于判断是否够格参与排序）
     samples: u64,
+    /// 首帧延迟 EWMA（毫秒）。只有成功且采到首帧的样本才更新。
+    latency_ms: Option<f64>,
 }
 
 /// 一次退避记录：休息到 `until`；`strikes` 是连续失败笔数（决定翻倍档）。
@@ -490,6 +492,14 @@ impl RouteState {
     /// 只记「最近表现」：EWMA 天然衰减，样本数只增（用于判断够不够格参与排序）。
     /// 表超过 4096 个账号时整表清空 —— 正常部署远达不到，纯属防内存无限增长。
     pub(super) fn score_record(&self, account_id: &str, ok: bool) {
+        self.score_record_full(account_id, ok, None);
+    }
+
+    /// 同 [`RouteState::score_record`]，但额外带上首帧延迟（毫秒）。
+    ///
+    /// 延迟只采**成功**请求的首帧时间：失败请求的耗时包含重试与退避，
+    /// 混进去会把「上游慢」和「我们等得久」混为一谈。`None` = 这次没采到首帧。
+    pub(super) fn score_record_full(&self, account_id: &str, ok: bool, latency_ms: Option<i64>) {
         if account_id.is_empty() {
             return;
         }
@@ -498,13 +508,26 @@ impl RouteState {
             table.clear();
         }
         let target = if ok { 1.0 } else { 0.0 };
-        let entry = table.entry(account_id.to_string()).or_insert(ScoreEntry { rate: target, samples: 0 });
+        let entry = table.entry(account_id.to_string()).or_insert(ScoreEntry {
+            rate: target,
+            samples: 0,
+            latency_ms: None,
+        });
         entry.rate = if entry.samples == 0 {
             target
         } else {
             (1.0 - SCORE_ALPHA) * entry.rate + SCORE_ALPHA * target
         };
         entry.samples = entry.samples.saturating_add(1);
+        if ok {
+            if let Some(ms) = latency_ms.filter(|ms| *ms >= 0) {
+                let ms = ms as f64;
+                entry.latency_ms = Some(match entry.latency_ms {
+                    Some(previous) => (1.0 - SCORE_ALPHA) * previous + SCORE_ALPHA * ms,
+                    None => ms,
+                });
+            }
+        }
     }
 
     /// 该账号当前成功率；样本不足（`SCORE_MIN_SAMPLES`）时返回 None，不参与排序。
@@ -514,6 +537,12 @@ impl RouteState {
             .get(account_id)
             .filter(|entry| entry.samples >= SCORE_MIN_SAMPLES)
             .map(|entry| entry.rate)
+    }
+
+    /// 该账号的近期首帧延迟 EWMA（毫秒）；没有可用样本时 None。
+    pub(super) fn latency_of(&self, account_id: &str) -> Option<f64> {
+        let table = self.scores.lock().ok()?;
+        table.get(account_id).and_then(|entry| entry.latency_ms)
     }
 
     /// 记一笔垫底（还有额度时被 429 的账号）。
@@ -833,6 +862,33 @@ mod tests {
         assert!(state.score_of("a1").unwrap() < SCORE_LOW);
         assert!(state.score_of("a2").unwrap() >= SCORE_LOW);
         assert_eq!(state.score_of("unknown"), None);
+    }
+
+    /// 延迟 EWMA：只采成功样本的延迟，失败请求的耗时（含重试等待）不算。
+    #[test]
+    fn latency_only_counts_successful_samples() {
+        let state = RouteState::new();
+        state.score_record_full("a1", true, Some(1_000));
+        state.score_record_full("a1", true, Some(3_000));
+        let latency = state.latency_of("a1").unwrap();
+        // EWMA(α=0.2)：1000 → 1000*0.8 + 3000*0.2 = 1400
+        assert!((latency - 1_400.0).abs() < 1.0, "实际 {latency}");
+
+        // 失败样本不更新延迟（但照样计入样本数）
+        let before = state.latency_of("a1").unwrap();
+        state.score_record_full("a1", false, Some(99_000));
+        assert_eq!(state.latency_of("a1").unwrap(), before, "失败请求的耗时不进延迟 EWMA");
+    }
+
+    /// 没采到首帧（None）时不产生延迟读数。
+    #[test]
+    fn latency_is_absent_without_a_first_frame_sample() {
+        let state = RouteState::new();
+        state.score_record_full("a1", true, None);
+        assert_eq!(state.latency_of("a1"), None);
+        // 负数（时钟异常）也不该被采信
+        state.score_record_full("a2", true, Some(-5));
+        assert_eq!(state.latency_of("a2"), None);
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {

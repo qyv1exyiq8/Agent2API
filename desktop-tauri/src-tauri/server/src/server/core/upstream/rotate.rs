@@ -530,11 +530,19 @@ pub(super) fn scoped_accounts(
                 account["quotaPoolCooldown"] = entry;
             }
         }
-        // 近期成功率：注入给选路做「软降级」——低于 `SCORE_LOW` 的账号排到队尾，
-        // 但不跳过；样本不足时不注入（见 `RouteState::score_of`）。
-        let score = routing::account_id(&account).and_then(|id| service.route.score_of(id));
+        // 近期表现：注入给选路做「软降级」——分数低的账号排到队尾，但不跳过；
+        // 样本不足时不注入（见 `RouteState::score_of`）。
+        // 先把 id 复制成 owned 再写入，避免与下面的可变借用打架。
+        let account_id = routing::account_id(&account).map(str::to_string);
+        let score = account_id.as_deref().and_then(|id| service.route.score_of(id));
         if let Some(rate) = score {
             account["routeScore"] = rate.into();
+        }
+        // 首帧延迟（毫秒）：比阈值慢太多也该让位。阈值取绝对值不取相对值 ——
+        // 相对阈值在冷启动（只有一个账号有样本）时会自我放大。
+        let latency = account_id.as_deref().and_then(|id| service.route.latency_of(id));
+        if let Some(ms) = latency {
+            account["routeLatencyMs"] = ms.into();
         }
         account
     }).filter(|account| {
