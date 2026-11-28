@@ -759,6 +759,15 @@ pub fn plan_route(
     };
     arranged.sort_by_key(|account| rank_of(account, meta.sunk));
     arranged.sort_by_key(|account| rank_of(account, meta.resting));
+    // 软降级：近期成功率明显偏低（样本足够时由选路快照注入 `routeScore`）的账号
+    // 排到队尾。**只调位次、永不跳过** —— 与熔断（下一层，直接跳过）分工明确：
+    // 偶发失败不该被熔断，但也不该一直占着队首。成功几次后 EWMA 回升即自动复位。
+    arranged.sort_by_key(|account| {
+        account
+            .get("routeScore")
+            .and_then(Value::as_f64)
+            .is_some_and(|rate| rate < 0.5)
+    });
     // 熔断的账号放在队尾（所有策略一致）：只有全场都打不开时才轮到它试一次
     arranged.sort_by_key(|account| {
         account_id(account)
@@ -932,6 +941,41 @@ mod tests {
         // 空白池名视为不参与
         let blank = json!({ "id": "a1", "provider": "P", "quotaPool": "  " });
         assert_eq!(quota_pool_of(&blank), None);
+    }
+
+    /// 软降级：近期成功率偏低（样本足够时由选路注入 `routeScore`）的账号排到队尾，
+    /// 但**仍在计划里**（不跳过）。与熔断的分工：熔断跳过，这一层只调位次。
+    #[test]
+    fn low_score_accounts_are_deprioritized_but_never_dropped() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Order,
+            sunk: &empty_numbers,
+            resting: &empty_numbers,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: None,
+        };
+        let accounts = vec![
+            json!({ "id": "good", "provider": "A", "priority": 100, "routeScore": 0.95 }),
+            json!({ "id": "bad", "provider": "A", "priority": 101, "routeScore": 0.2 }),
+            // 没有 routeScore（样本不足）→ 不参与评分，按原优先级排
+            json!({ "id": "unknown", "provider": "A", "priority": 102 }),
+        ];
+        let plan = plan_route(
+            &accounts,
+            &CooldownKeys::new("m"),
+            &counts,
+            &[],
+            1_700_000_000_000,
+            &meta,
+        );
+        let ids: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["good", "unknown", "bad"], "低分账号排最后，但不被丢弃");
     }
 
     /// 家内轮询的一份最小 meta：只带各家游标，其余状态为空。

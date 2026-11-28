@@ -72,6 +72,11 @@ pub(super) fn finish_failure(service: &UpstreamService, ctx: &ProviderContext<'_
     };
     error_policy::note(ctx.telemetry, &decision, blocked_reason);
     if decision.hard_stop || ctx.telemetry.is_cancelled() { return false; }
+    // 成功率记账（选路「软降级」的输入）：只有真实失败才算 —— 取消/硬停不计，
+    // 否则一次客户端断开就会把一个好账号的分数拖下去。
+    if let Some(account) = target.account_id.as_deref() {
+        service.route.score_record(account, false);
+    }
     if let Some(account) = target.account_id.as_deref() {
         if decision.deprioritizes() {
             let until = service.route.deprioritize_mark_scoped(account, &target.provider, &model, decision.scope, &decision.rule, logging::now_ms());

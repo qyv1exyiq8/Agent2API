@@ -530,6 +530,12 @@ pub(super) fn scoped_accounts(
                 account["quotaPoolCooldown"] = entry;
             }
         }
+        // 近期成功率：注入给选路做「软降级」——低于 `SCORE_LOW` 的账号排到队尾，
+        // 但不跳过；样本不足时不注入（见 `RouteState::score_of`）。
+        let score = routing::account_id(&account).and_then(|id| service.route.score_of(id));
+        if let Some(rate) = score {
+            account["routeScore"] = rate.into();
+        }
         account
     }).filter(|account| {
         pinned.is_some() || !account.get("upstreamCooldownUntil").and_then(Value::as_i64)

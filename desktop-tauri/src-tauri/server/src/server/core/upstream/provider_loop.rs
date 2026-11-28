@@ -789,6 +789,7 @@ async fn attempt_queue(
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear_scoped(account_id, &failed_target.provider, &clear_model);
+                        service.route.score_record(account_id, true);
                     }
                     return Ok(outcome);
                 },
@@ -878,6 +879,7 @@ async fn attempt_queue(
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear_scoped(account_id, provider_id, &clear_model);
+                        service.route.score_record(account_id, true);
                     }
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
@@ -1386,6 +1388,7 @@ async fn attempt_queue(
                         }
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear_scoped(account_id, provider_id, &wire_model);
+                        service.route.score_record(account_id, true);
                         // 这次转发成功 = 账号的登录态**此刻确实可用**：清掉可能
                         // 存在的「需要重新登录」标记（用户可能已经在别处重新登录
                         // 过，或者之前那次 401 是上游抖动）。

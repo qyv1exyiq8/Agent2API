@@ -42,8 +42,7 @@ use crate::server::core::routing::{account_id, provider_of, CooldownKeys};
 pub(super) const BACKOFF_BASE_MS: i64 = 15 * 60 * 1000;
 const BACKOFF_MAX_MS: i64 = 60 * 60 * 1000;
 
-/// 限流垫底的时长（30 分钟）。
-///
+/// 限流垫底的时长（30 分钟）。///
 /// ── 为什么需要它（上游原实现没有，2026-10-13 修）─────────────────
 /// 上游的 `sink` 存的是「沉底时刻」但**从不看过没过期**（`snapshot` 原样克隆
 /// 整张表），而唯一的解除路径是 `sink_clear` —— 它只在**该账号成功转发一次**
@@ -61,6 +60,29 @@ const BACKOFF_MAX_MS: i64 = 60 * 60 * 1000;
 ///     不是「这个账号本身有问题」，重犯不该加重）。
 /// 到点自动回到队列，与「冷却到点自动回来」同一口径。
 const SINK_TTL_MS: i64 = 30 * 60 * 1000;
+
+/// 成功率评分的 EWMA 衰减系数：每个样本占 20%，旧的占 80%。
+/// 取 0.2 是「记得住趋势、但几条异常也能拉回来」的量级 —— 约 10 个样本后
+/// 旧值的权重降到三成以下，与 `SCORE_MIN_SAMPLES` 配套。
+const SCORE_ALPHA: f64 = 0.2;
+/// 评分生效所需的最小样本数：太少的样本（1~2 条）不足以说明问题，
+/// 此时不参与排序，避免「第一次失败就被打入冷宫」。
+pub(super) const SCORE_MIN_SAMPLES: u64 = 8;
+/// 低分线：低于它才「软降级」排到队尾（阈值选在 0.5 ＝ 一半失败）。
+pub(super) const SCORE_LOW: f64 = 0.5;
+
+/// 一个账号的近期表现（成功率 EWMA）。
+///
+/// 与熔断的区别：熔断是「连续失败到阈值就**跳过**」（二值、会拒服务）；
+/// 这里是「成功率长期偏低就**排到队尾**」（连续、绝不拒服务）。两者互补：
+/// 偶发失败不该熔断，但也不该一直待在队首。
+#[derive(Clone, Copy, Debug)]
+struct ScoreEntry {
+    /// 成功率（0.0~1.0，EWMA）
+    rate: f64,
+    /// 累计样本数（只增，用于判断是否够格参与排序）
+    samples: u64,
+}
 
 /// 一次退避记录：休息到 `until`；`strikes` 是连续失败笔数（决定翻倍档）。
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +123,9 @@ pub(super) struct RouteState {
     deprioritized_strikes: Mutex<HashMap<String, (i64, u64)>>,
     /// 熔断：账号 id → 状态
     breaker: Mutex<HashMap<String, BreakerEntry>>,
+    /// 近期成功率（EWMA）：账号 id → 评分。用于「软降级」——低分账号排到队尾，
+    /// 但不跳过、不禁用，成功几次后自动回到正常位次。
+    scores: Mutex<HashMap<String, ScoreEntry>>,
 }
 
 /// 粘性 / 垫底 / 退避的快照（选路纯函数的输入）。
@@ -460,6 +485,37 @@ impl RouteState {
         }
     }
 
+    /// 记一条转发结果，维护该账号的成功率 EWMA（选路「软降级」的输入）。
+    ///
+    /// 只记「最近表现」：EWMA 天然衰减，样本数只增（用于判断够不够格参与排序）。
+    /// 表超过 4096 个账号时整表清空 —— 正常部署远达不到，纯属防内存无限增长。
+    pub(super) fn score_record(&self, account_id: &str, ok: bool) {
+        if account_id.is_empty() {
+            return;
+        }
+        let Ok(mut table) = self.scores.lock() else { return };
+        if table.len() > 4096 && !table.contains_key(account_id) {
+            table.clear();
+        }
+        let target = if ok { 1.0 } else { 0.0 };
+        let entry = table.entry(account_id.to_string()).or_insert(ScoreEntry { rate: target, samples: 0 });
+        entry.rate = if entry.samples == 0 {
+            target
+        } else {
+            (1.0 - SCORE_ALPHA) * entry.rate + SCORE_ALPHA * target
+        };
+        entry.samples = entry.samples.saturating_add(1);
+    }
+
+    /// 该账号当前成功率；样本不足（`SCORE_MIN_SAMPLES`）时返回 None，不参与排序。
+    pub(super) fn score_of(&self, account_id: &str) -> Option<f64> {
+        let table = self.scores.lock().ok()?;
+        table
+            .get(account_id)
+            .filter(|entry| entry.samples >= SCORE_MIN_SAMPLES)
+            .map(|entry| entry.rate)
+    }
+
     /// 记一笔垫底（还有额度时被 429 的账号）。
     pub(super) fn sink_mark(&self, account_id: &str, now: i64) {
         self.sink_mark_for(account_id, now, crate::server::config::error_policy::snapshot().settings.sink_seconds);
@@ -721,6 +777,63 @@ mod tests {
     use super::*;
     use axum::http::{HeaderName, HeaderValue};
     use serde_json::json;
+
+    /// 成功率评分：样本不足时不参与排序（避免「第一次失败就被打入冷宫」）。
+    #[test]
+    fn score_needs_enough_samples_before_it_counts() {
+        let state = RouteState::new();
+        for _ in 0..(SCORE_MIN_SAMPLES - 1) {
+            state.score_record("a1", true);
+        }
+        assert_eq!(state.score_of("a1"), None, "样本不足 {SCORE_MIN_SAMPLES} 条时不该有分");
+
+        state.score_record("a1", true);
+        assert_eq!(state.score_of("a1"), Some(1.0), "全部成功时分数应为 1.0");
+    }
+
+    /// 偶发失败只让分数轻微下降（EWMA），不会一次失败就判死。
+    #[test]
+    fn a_single_failure_only_dents_the_score() {
+        let state = RouteState::new();
+        for _ in 0..10 {
+            state.score_record("a1", true);
+        }
+        let before = state.score_of("a1").unwrap();
+        state.score_record("a1", false);
+        let after = state.score_of("a1").unwrap();
+        assert!(after < before, "失败后分数应下降");
+        assert!(after > 0.75, "单次失败不该把分数打到低分区（实际 {after}）");
+    }
+
+    /// 连续失败会把分数压到低分线以下（软降级触发），随后连续成功能自己爬回来。
+    #[test]
+    fn repeated_failures_drop_below_the_line_and_recovery_lifts_it_back() {
+        let state = RouteState::new();
+        for _ in 0..12 {
+            state.score_record("a1", false);
+        }
+        let low = state.score_of("a1").unwrap();
+        assert!(low < SCORE_LOW, "连续失败后应低于低分线（实际 {low}）");
+
+        for _ in 0..25 {
+            state.score_record("a1", true);
+        }
+        let recovered = state.score_of("a1").unwrap();
+        assert!(recovered >= SCORE_LOW, "连续成功应能恢复到低分线以上（实际 {recovered}）");
+    }
+
+    /// 评分按账号隔离。
+    #[test]
+    fn scores_are_per_account() {
+        let state = RouteState::new();
+        for _ in 0..10 {
+            state.score_record("a1", false);
+            state.score_record("a2", true);
+        }
+        assert!(state.score_of("a1").unwrap() < SCORE_LOW);
+        assert!(state.score_of("a2").unwrap() >= SCORE_LOW);
+        assert_eq!(state.score_of("unknown"), None);
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
