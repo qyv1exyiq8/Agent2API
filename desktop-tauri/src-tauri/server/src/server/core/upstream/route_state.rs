@@ -68,8 +68,11 @@ const SCORE_ALPHA: f64 = 0.2;
 /// 评分生效所需的最小样本数：太少的样本（1~2 条）不足以说明问题，
 /// 此时不参与排序，避免「第一次失败就被打入冷宫」。
 pub(super) const SCORE_MIN_SAMPLES: u64 = 8;
-/// 低分线：低于它才「软降级」排到队尾（阈值选在 0.5 ＝ 一半失败）。
-pub(super) const SCORE_LOW: f64 = 0.5;
+/// 低分线：低于它才「软降级」排到队尾。
+///
+/// 常量本体在 `core::routing`（判定发生在那里），这里转出是为了本模块的
+/// 测试能直接引用 —— **同一个阈值只有一份定义**，改一处不会漏另一处。
+pub(super) use crate::server::core::routing::SCORE_LOW;
 
 /// 一个账号的近期表现（成功率 EWMA + 延迟 EWMA）。
 ///

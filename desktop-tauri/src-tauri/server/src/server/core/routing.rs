@@ -39,6 +39,20 @@ use serde_json::{json, Value};
 use crate::server::core::account_store::priority::{by_priority_order, normalize_priority};
 use crate::server::core::account_store::store_util::js_truthy;
 
+/// 成功率「低分线」：低于它才让位到队尾（阈值选在 0.5 ＝ 一半失败）。
+///
+/// 定义放在这里（而不是 `upstream::route_state`）是因为**判定发生在本模块**
+/// —— `route_state` 只负责记分与注入读数，判据在 `plan_route` 里。两处各写
+/// 一份阈值的话，改一处就会漏另一处。
+pub const SCORE_LOW: f64 = 0.5;
+
+/// 首帧延迟的「慢」线（毫秒）：超过它就让位到队尾。
+///
+/// 取**绝对值**而不是相对中位数：冷启动时只有一个账号有样本，相对阈值会
+/// 自己跟自己比，永远判不出慢来。15 秒是「用户等得起」的上限 —— 再慢下去
+/// 不如换个账号。
+pub const ROUTE_LATENCY_SLOW_MS: f64 = 15_000.0;
+
 /// 「请求名 → 各家上游真名」的解析缓存：限额冷却键的解析器。
 ///
 /// ── 为什么冷却键必须是真名而不是请求名（本模块最要紧的一条）─────
@@ -757,28 +771,39 @@ pub fn plan_route(
             .map(|until| *until > 0)
             .unwrap_or(false)
     };
-    arranged.sort_by_key(|account| rank_of(account, meta.sunk));
-    arranged.sort_by_key(|account| rank_of(account, meta.resting));
-    // 软降级 + 延迟降级：合并成**一个**排序键（分成两轮独立排序会让后一轮
-    // 覆盖前一轮的顺序 —— `sort_by_key` 稳定，但它排的是整个序列）。两个信号
-    // 都只调位次、**永不跳过**：
+    // ── 排序修饰层 ──────────────────────────────────────────────
+    //
+    // ⚠️ `sort_by_key` 是**稳定**排序，而且每一轮都对**整个数组**排 ——
+    // 所以**后执行的层优先级更高**。四层的强弱次序是：
+    //
+    //   熔断（直接跳过，只在全场都打不开时才试）
+    //     > 退避（这个账号刚失败过，歇一会儿）
+    //       > 沉底（额度用完待恢复）
+    //         > 软降级 / 延迟降级（只是「排后面」，仍在计划里）
+    //
+    // 低分层必须**最先**执行（优先级最低）：否则一个「正在退避」的低分账号
+    // 会被一个「没退避但低分」的账号压到后面 —— 退避是更强的约束，不能被
+    // 软降级盖过。
+    //
+    // 两个信号合并成**一个**排序键：分成两轮独立排序会让后一轮覆盖前一轮的
+    // 顺序。它们都只调位次、**永不跳过**：
     //   - 成功率明显偏低（样本足够时由选路注入 `routeScore`）→ 排到队尾。
-    //     与熔断（下一层，直接跳过）分工明确：偶发失败不该熔断，但不该一直占队首。
-    //     成功几次后 EWMA 回升即自动复位。
-    //   - 首帧明显慢（`routeLatencyMs`）→ 同样让位。阈值取**绝对值**（15 秒）
-    //     而不是相对中位数：冷启动时只有一个账号有样本，相对阈值会自己和自己比，
-    //     永远判不出慢来。
+    //     与熔断分工明确：偶发失败不该熔断，但不该一直占队首。成功几次后
+    //     EWMA 回升即自动复位。
+    //   - 首帧明显慢（`routeLatencyMs`）→ 同样让位。
     arranged.sort_by_key(|account| {
         let low_score = account
             .get("routeScore")
             .and_then(Value::as_f64)
-            .is_some_and(|rate| rate < 0.5);
+            .is_some_and(|rate| rate < SCORE_LOW);
         let slow = account
             .get("routeLatencyMs")
             .and_then(Value::as_f64)
-            .is_some_and(|ms| ms > 15_000.0);
+            .is_some_and(|ms| ms > ROUTE_LATENCY_SLOW_MS);
         u8::from(low_score) + u8::from(slow)
     });
+    arranged.sort_by_key(|account| rank_of(account, meta.sunk));
+    arranged.sort_by_key(|account| rank_of(account, meta.resting));
     // 熔断的账号放在队尾（所有策略一致）：只有全场都打不开时才轮到它试一次
     arranged.sort_by_key(|account| {
         account_id(account)
@@ -1019,6 +1044,41 @@ mod tests {
         );
         let ids: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(ids, vec!["fast", "slow"], "慢账号排最后，但不被丢弃");
+    }
+
+    /// 排序层的强弱次序：退避（强）压过低分（弱）。
+    ///
+    /// ⚠️ `sort_by_key` 稳定且每轮对整个数组排，所以**后执行的层优先级更高**。
+    /// 低分层必须最先执行 —— 否则「正在退避」的低分账号会被「没退避但低分」
+    /// 的账号压到后面（退避是更强的约束，不能被软降级盖过）。
+    #[test]
+    fn backoff_outranks_the_soft_score_demotion() {
+        let empty_numbers: HashMap<String, i64> = HashMap::new();
+        let empty_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let counts: HashMap<String, usize> = HashMap::new();
+        let mut resting: HashMap<String, i64> = HashMap::new();
+        // rest-1 正在退避，同时成功率很低
+        resting.insert("rest-1".to_string(), 1_700_000_000_000 + 60_000);
+        let meta = PlanMeta {
+            strategy: RouteStrategy::Order,
+            sunk: &empty_numbers,
+            resting: &resting,
+            open: &empty_ids,
+            limiter_blocked: &empty_ids,
+            cursor: None,
+            provider_cursors: None,
+            sticky_account: None,
+        };
+        let accounts = vec![
+            // low-only：没退避，但低分
+            json!({ "id": "low-only", "provider": "A", "priority": 100, "routeScore": 0.1 }),
+            // rest-1：在退避中，也是低分
+            json!({ "id": "rest-1", "provider": "A", "priority": 101, "routeScore": 0.1 }),
+        ];
+        let plan = plan_route(&accounts, &CooldownKeys::new("m"), &counts, &[], 1_700_000_000_000, &meta);
+        let ids: Vec<&str> = plan.ordered.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["low-only", "rest-1"],
+            "退避中的账号必须排在「没退避但同样低分」的账号之后");
     }
 
     /// 家内轮询的一份最小 meta：只带各家游标，其余状态为空。

@@ -266,7 +266,7 @@ export function RoutingPage() {
         {errorsOpen ? null : specialKey === 'compact' ? <CompactSpecialPanel editor={compactEditor} /> :
           specialKey === 'vision' ? <VisionSpecialPanel editor={visionEditor} /> :
             specialKey === 'title' ? <TitleSpecialPanel editor={titleEditor} /> :
-              specialKey === 'shared' ? <RoutingSharedModels onCreated={() => { void groups.reload() }} /> :
+              specialKey === 'shared' ? <RoutingSharedModels refreshToken={refreshToken} onCreated={() => { void groups.reload() }} /> :
                 groups.selected ? <RoutingGroupPanel key={groups.selected} editor={groups} accounts={replay.workspace?.accounts || workspace?.accounts || []}
                 reserved={reserved} baseUrl={host().wbPortPanel?.gatewayBase() || `http://127.0.0.1:${workspace?.gateway.port || 3065}`}
                 onAccount={accountSettings} sorting={sorting} now={replay.now} onSort={groupSettings} lastUsed={modelLastUsed}

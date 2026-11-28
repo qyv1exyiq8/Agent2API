@@ -20,6 +20,14 @@ export type SharedModel = {
   providers: string[]
   /** 各家成员（上游名 + 账号数） */
   members: SharedModelMember[]
+  /**
+   * 建议的**路由组对外 ID**（后端给的）。
+   *
+   * 不能直接用 `model` 当对外 ID —— 后端有一条硬规则：对外 ID 若已被任何
+   * 提供商承载就拒绝建组（否则客户端点这个名字时无法区分走路由组还是走
+   * 原生模型）。同名模型必然被多家承载，所以要加一个后缀。
+   */
+  suggestedModel?: string
 }
 
 /**
@@ -32,7 +40,7 @@ export type SharedModel = {
  *
  * 只读 + 一键建组，**不改变**已生效的转发行为：没有组的模型照样跨厂容灾。
  */
-export function RoutingSharedModels({ onCreated }: { onCreated?: () => void }) {
+export function RoutingSharedModels({ onCreated, refreshToken }: { onCreated?: () => void; refreshToken?: number }) {
   const [shared, setShared] = React.useState<SharedModel[]>([])
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState('')
@@ -50,26 +58,30 @@ export function RoutingSharedModels({ onCreated }: { onCreated?: () => void }) {
     }
   }, [])
 
-  React.useEffect(() => { void load() }, [load])
+  // `refreshToken` 变化时重新拉取（页面上的「重新读取」会递增它）
+  React.useEffect(() => { void load() }, [load, refreshToken])
 
-  /** 一键把同名模型建成一个路由组：成员 = 各家承载该模型的提供商。 */
+  /**
+   * 一键把同名模型建成一个路由组：成员 = 各家承载该模型的提供商。
+   *
+   * ⚠️ 对外模型 ID **不能**直接用原模型名 —— 后端 `routing_groups::save` 有
+   * 一条硬规则：对外 ID 若已被任何提供商承载就拒绝建组（否则客户端点这个名字
+   * 时无法区分走路由组还是走原生模型）。同名模型必然被多家承载，所以用后端
+   * 建议的名字（原名 + `-auto` 后缀），成员仍是各家的上游模型名。
+   */
   const createGroup = async (entry: SharedModel) => {
     if (creating) return
     setCreating(entry.key); setError('')
     try {
       const groups = await bridge().getRoutingGroups()
-      // 组 id 用模型名本身（同名模型本来就是一个对外名，重名即同一组）
-      const id = entry.model
-      if (groups.groups.some(row => row.group.id === id)) {
-        notify(t('该模型已经有一个路由组了'), 'err')
-        return
-      }
+      // 对外 ID 由后端建议（规则由后端校验决定，这里不自己拼）
+      const id = entry.suggestedModel || `${entry.model}-auto`
       await bridge().saveRoutingGroup({
         id,
         group: {
           id,
           name: entry.model,
-          model: entry.model,
+          model: id,
           description: t('自动同名组：{model} 由 {count} 家提供商共同承载',
             { model: entry.model, count: entry.providers.length }),
           strategy: 'order',
@@ -84,7 +96,7 @@ export function RoutingSharedModels({ onCreated }: { onCreated?: () => void }) {
         },
         revision: groups.newRevision,
       })
-      notify(t('已创建同名组：{model}', { model: entry.model }))
+      notify(t('已创建同名组：{model}（对外模型名 {id}）', { model: entry.model, id }), 'ok')
       onCreated?.()
     } catch (failure) {
       setError(errorMessage(failure))
@@ -113,6 +125,11 @@ export function RoutingSharedModels({ onCreated }: { onCreated?: () => void }) {
               {creating === entry.key ? t('创建中…') : t('一键建组')}
             </Button>
           </div>
+          {entry.suggestedModel ? (
+            <p className='detail' style={{ margin: '0 0 8px' }}>
+              {t('建组后的对外模型名：{id}（客户端点这个名字才会走这个组）', { id: entry.suggestedModel })}
+            </p>
+          ) : null}
           <ul className='routing-shared-model-members'>
             {entry.members.map(member => (
               <li key={member.provider}>

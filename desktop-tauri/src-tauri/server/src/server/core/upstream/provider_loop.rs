@@ -789,7 +789,10 @@ async fn attempt_queue(
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear_scoped(account_id, &failed_target.provider, &clear_model);
-                        service.route.score_record(account_id, true);
+                        // 自定义路径不走 `send_with_retry`，采不到响应头时刻 ——
+                        // 用「成功返回时刻 − 开始时刻」兜底（见 attempt_latency_ms）。
+                        let latency_ms = ctx.telemetry.attempt_latency_ms();
+                        service.route.score_record_full(account_id, true, latency_ms);
                     }
                     return Ok(outcome);
                 },
@@ -879,7 +882,10 @@ async fn attempt_queue(
                         );
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear_scoped(account_id, provider_id, &clear_model);
-                        service.route.score_record(account_id, true);
+                        // 会话式路径同样不走 `send_with_retry`，用「成功返回时刻 −
+                        // 开始时刻」兜底（见 attempt_latency_ms）。
+                        let latency_ms = ctx.telemetry.attempt_latency_ms();
+                        service.route.score_record_full(account_id, true, latency_ms);
                     }
                     return Ok(crate::server::core::plugin_host::hold_adapter(outcome, adapter_handle));
                 },
@@ -1388,14 +1394,10 @@ async fn attempt_queue(
                         }
                         service.route.backoff_clear(account_id);
                         service.route.sink_clear_scoped(account_id, provider_id, &wire_model);
-                        // 成功率 + 首帧延迟一起记账（延迟取**本轮**尝试的
-                        // `response_at - started_at`：换号重试时每轮各自计时，
-                        // 取最后一次成功的那一轮，不会把前面失败的等待算进去）。
-                        let latency_ms = ctx.telemetry.snapshot().attempts_detail.last()
-                            .and_then(|attempt| match (attempt.started_at, attempt.response_at) {
-                                (Some(started), Some(response)) => Some(response.saturating_sub(started).max(0)),
-                                _ => None,
-                            });
+                        // 成功率 + 首帧延迟一起记账（延迟取**本轮**尝试的耗时：
+                        // 换号重试时每轮各自计时，取最后一次成功的那一轮，
+                        // 不会把前面失败的等待算进去）。
+                        let latency_ms = ctx.telemetry.attempt_latency_ms();
                         service.route.score_record_full(account_id, true, latency_ms);
                         // 这次转发成功 = 账号的登录态**此刻确实可用**：清掉可能
                         // 存在的「需要重新登录」标记（用户可能已经在别处重新登录

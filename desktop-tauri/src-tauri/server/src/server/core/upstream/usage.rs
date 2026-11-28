@@ -357,6 +357,18 @@ pub struct TelemetrySnapshot {
     /// 条数上限见 [`MAX_ATTEMPT_DETAILS`]：这是一条请求内的内存小数组，
     /// 落库时序列化成 JSON 文本，必须有上界。
     pub attempts_detail: Vec<AttemptDetail>,
+    /// **当前**尝试的开始时刻（毫秒）。
+    ///
+    /// 与 `attempts_detail` 分开记：那个数组有 24 条上限，超限后
+    /// `note_attempt_started` 不再 push，于是 `last()` 拿到的是**陈旧**的
+    /// 尝试（重试极多的请求会算错延迟）。延迟采样必须看「当前」这一轮，
+    /// 所以单独记一个字段。
+    pub current_started_at: Option<i64>,
+    /// **当前**尝试的响应头时刻（毫秒）。
+    ///
+    /// 与 `attempts_detail` 分开记：明细数组超限时 `current_attempt_mut()`
+    /// 会返回 None，那个响应头时刻就丢了 —— 延迟采样会退化成「整段耗时」。
+    pub current_response_at: Option<i64>,
     pub route: Option<Value>,
     pub(crate) vision_calls: Vec<super::vision_compat::VisionCall>,
     route_revision: u64,
@@ -1260,6 +1272,62 @@ mod usage_extraction {
 }
 
 #[cfg(test)]
+/// 首帧延迟的采样口径（`attempt_latency_ms`）。
+///
+/// 这组测试盯的是**跨轮污染**：换号重试时，上一轮的响应头时刻不能被算进
+/// 下一轮的延迟里 —— 否则会得到一个跨轮的错值（甚至负数）。
+mod attempt_latency_observation {
+    use super::*;
+
+    /// 换号重试后，延迟只算**当前这一轮**。
+    ///
+    /// 复现路径：第一轮收到响应头后失败 → 第二轮换号开始。若第二轮开始时
+    /// 没有清掉上一轮的响应头时刻，第二轮若没记到自己的响应头（明细数组
+    /// 超限时就会这样），延迟会用旧时刻去减新的开始时刻。
+    #[test]
+    fn a_new_attempt_does_not_inherit_the_previous_response_at() {
+        let telemetry = RequestTelemetry::new();
+        telemetry.note_attempt_started("prov-a", "acct-a");
+        telemetry.note_attempt_response();
+        let first = telemetry.attempt_latency_ms().expect("第一轮应有延迟");
+
+        // 换号重试：新一轮开始，上一轮的响应头时刻必须被清掉
+        telemetry.note_attempt_started("prov-b", "acct-b");
+        // 新一轮**没有**自己的响应头时刻（明细数组超限时就会这样）
+        let second = telemetry.attempt_latency_ms();
+        // 不能是「上一轮的响应头时刻 − 这一轮的开始时刻」那种跨轮值
+        if let Some(value) = second {
+            assert!(value >= 0, "延迟不能是负数（跨轮相减了）：{value}");
+            assert!(
+                value <= first.max(1) + 1000,
+                "延迟 {value} 不该跨轮（第一轮是 {first}）"
+            );
+        }
+    }
+
+    /// 没起过尝试时没有延迟读数。
+    #[test]
+    fn no_attempt_means_no_latency() {
+        let telemetry = RequestTelemetry::new();
+        assert_eq!(telemetry.attempt_latency_ms(), None);
+    }
+
+    /// 明细数组超限后，延迟采样仍然取**当前**这一轮（而不是数组里的旧条目）。
+    ///
+    /// `attempts_detail` 有 24 条上限，超限后 `note_attempt_started` 不再 push。
+    /// 若延迟采样依赖 `last()`，它会拿到第 24 条（旧尝试）—— 那算的是别的轮次。
+    #[test]
+    fn latency_survives_the_attempt_detail_limit() {
+        let telemetry = RequestTelemetry::new();
+        // 撑满明细数组
+        for _ in 0..(MAX_ATTEMPT_DETAILS + 2) {
+            telemetry.note_attempt_started("prov", "acct");
+        }
+        let latency = telemetry.attempt_latency_ms().expect("超限后仍应有当前轮的延迟");
+        assert!(latency >= 0, "延迟不能是负数：{latency}");
+    }
+}
+
 mod body_bytes_observation {
     //! 发出量这条观测的采集侧（存储侧的透传见 `request_stats::record` 与 `api::pipeline`）。
 

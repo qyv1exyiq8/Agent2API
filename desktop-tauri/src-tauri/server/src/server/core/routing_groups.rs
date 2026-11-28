@@ -142,21 +142,56 @@ pub fn group_shared_models(choices: &[Value]) -> Vec<Value> {
 /// 这个发现只做「可见 + 可一键成组」，不改变转发行为。
 pub fn discover_shared_models(store: &AccountStore) -> Vec<Value> {
     let accounts = store.routing_snapshot();
-    let mut shared = group_shared_models(&choices(store));
+    // 各家的账号数（**可用**账号：有凭证且未停用）
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for account in &accounts.accounts {
+        let provider = routing::provider_of(account).to_string();
+        *counts.entry(provider).or_insert(0) += 1;
+    }
+    // 只保留「有可用账号」的承载家 —— 一家都没账号的插件列进来只会让
+    // 「一键建组」建出一个空成员（该成员永远选不出账号）。
+    let choices: Vec<Value> = choices(store).into_iter().filter(|row| {
+        row.get("provider").and_then(Value::as_str)
+            .is_some_and(|provider| counts.get(provider).copied().unwrap_or(0) > 0)
+    }).collect();
+    let mut shared = group_shared_models(&choices);
     // 补上各家的账号数与展示名（决定这个组值不值得建）
     for entry in shared.iter_mut() {
         let Some(members) = entry.get_mut("members").and_then(Value::as_array_mut) else { continue };
         for member in members.iter_mut() {
             let provider = member.get("provider").and_then(Value::as_str).unwrap_or("").to_string();
-            let count = accounts.accounts.iter().filter(|account| routing::provider_of(account) == provider).count();
-            member["accountCount"] = Value::from(count);
+            member["accountCount"] = Value::from(counts.get(&provider).copied().unwrap_or(0));
             member["providerLabel"] = Value::from(providers::label_of(&provider));
         }
     }
     shared
 }
 
-pub fn candidate_key(member: &str, account: &str) -> String { format!("{member}\0{account}") }pub fn account_key(key: &str) -> &str { key.split_once('\0').map(|(_, account)| account).unwrap_or(key) }
+/// 为「跨厂同名模型」生成一个**可用的路由组对外 ID**。
+///
+/// ── 为什么不能直接用原模型名 ────────────────────────────────
+/// `config::routing_groups::save` 有一条硬规则：对外模型 ID 若已被任何提供商
+/// 承载就拒绝建组（否则客户端点这个名字时无法区分走路由组还是走原生模型）。
+/// 而「同名模型」的定义恰恰是**它被多家承载** —— 于是直接用原名建组必然被拒。
+///
+/// 所以对外名 = 原名 + 后缀；被占用就递增序号，直到找到空闲名。
+///
+/// 抽成纯函数（而不是在前端拼）：这条规则**由后端校验**决定，前端猜错就会
+/// 出现「点了创建却报『已被占用』」。规则只有一份，才不会漂。
+pub fn shared_group_model_id(base_model: &str, taken: &[String]) -> String {
+    let base = format!("{}-auto", base_model.trim());
+    let taken: Vec<String> = taken.iter().map(|value| value.to_ascii_lowercase()).collect();
+    let mut candidate = base.clone();
+    let mut index = 2;
+    while taken.iter().any(|value| *value == candidate.to_ascii_lowercase()) {
+        candidate = format!("{base}-{index}");
+        index += 1;
+    }
+    candidate
+}
+
+pub fn candidate_key(member: &str, account: &str) -> String { format!("{member}\0{account}") }
+pub fn account_key(key: &str) -> &str { key.split_once('\0').map(|(_, account)| account).unwrap_or(key) }
 pub fn member_key(key: &str) -> Option<&str> { key.split_once('\0').map(|(member, _)| member) }
 pub fn attempt_key(account: &Value) -> String {
     account.get("routingCandidateId").and_then(Value::as_str).unwrap_or_else(|| routing::account_id(account).unwrap_or("")).to_string()
@@ -333,6 +368,67 @@ mod tests {
         assert_eq!(groups[0].get("model").and_then(Value::as_str), Some("tri"));
     }
 
+    /// 对外 ID 必须**避开**已有模型名 —— 这是一键建组能不能成的生死线。
+    ///
+    /// 后端 `routing_groups::save` 规定：对外 ID 若已被任何提供商承载就拒绝
+    /// 建组。同名模型必然被多家承载，所以对外 ID 必须是「原名 + 后缀」。
+    #[test]
+    fn suggested_group_id_avoids_existing_models() {
+        assert_eq!(shared_group_model_id("gpt-5", &[]), "gpt-5-auto");
+        // 已占用 → 递增序号
+        assert_eq!(shared_group_model_id("gpt-5", &["gpt-5-auto".to_string()]), "gpt-5-auto-2");
+        assert_eq!(
+            shared_group_model_id("gpt-5", &["gpt-5-auto".to_string(), "gpt-5-auto-2".to_string()]),
+            "gpt-5-auto-3"
+        );
+        // 大小写不敏感（后端的比对是 eq_ignore_ascii_case）
+        assert_eq!(shared_group_model_id("gpt-5", &["GPT-5-AUTO".to_string()]), "gpt-5-auto-2");
+    }
+
+    /// 原模型名本身**不在**候选里 —— 生成的外对外名永远不等于原名。
+    ///
+    /// 这条钉住的是「同名模型不能直接当组名」这个事实：原名已被多家承载，
+    /// 用它建组必然被后端拒掉。
+    #[test]
+    fn suggested_group_id_never_equals_the_source_model() {
+        let model = "gpt-5";
+        let suggested = shared_group_model_id(model, &[]);
+        assert_ne!(suggested, model);
+    }
+
+    /// 生成的对外名**不会**撞上被承载的模型 —— 这是一键建组能成的关键。
+    ///
+    /// `save` 拒绝「对外 ID 已被任何提供商承载」。我们要造的名字（原名 + `-auto`）
+    /// 必须是**目录里没有的**名字。若上游恰好也有个 `gpt-5-auto`，那就要再退一步。
+    #[test]
+    fn suggested_group_id_does_not_collide_with_carried_models() {
+        // 取真实目录里被承载的模型名
+        let mut carried: Vec<String> = Vec::new();
+        for provider in crate::server::core::providers::executable_provider_ids() {
+            for item in crate::server::core::providers::catalog::manifest_for_provider(&provider) {
+                if let Some(model) = item.get("id").and_then(Value::as_str) {
+                    carried.push(model.to_string());
+                }
+            }
+        }
+        if carried.is_empty() {
+            eprintln!("跳过：测试环境里没有已装载的提供商");
+            return;
+        }
+        let base = &carried[0];
+        let suggested = shared_group_model_id(base, &[]);
+        // 生成的名字不能与**任何**被承载的模型重名
+        assert!(
+            !carried.iter().any(|model| model.eq_ignore_ascii_case(&suggested)),
+            "生成的外对外名 {suggested} 撞上了已有模型"
+        );
+        // 原名则是被承载的（这正是不能用原名当对外 ID 的原因）
+        assert!(
+            crate::server::core::providers::catalog::providers_for_model(base).len() >= 1,
+            "原名 {base} 应当是被承载的"
+        );
+    }
+
     /// 集成测试：对**真实账号库**跑发现逻辑（临时库 + 两个不同厂商的账号）。
     ///
     /// 纯函数测试覆盖了归并规则，这里补一条端到端：账号进库 → 快照读出 →
@@ -345,9 +441,10 @@ mod tests {
     fn shared_model_discovery_runs_against_a_real_store() {
         let (db, _temp) = crate::server::db::test_temp::TempDb::open("shared-models");
         let store = crate::server::core::account_store::AccountStore::with_db(Some(db));
-        // 账号 id 由 **uid** 派生：两条记录必须带不同的 uid（否则第二次写入
-        // 变成「更新既有账号」，快照里就只剩一条）。uid 放在顶层还是 auth 里
-        // 取决于各家；这里放 auth，与内置家的形状一致。
+        // 账号 id 由 **uid** 派生（`user-<uid>`）：两条记录必须带不同的 uid，
+        // 否则第二次写入变成「更新既有账号」，快照里就只剩一条。
+        // uid 的读取位置是 `account.uid` 或**载荷顶层**的 `uid`
+        // （见 `add_account`），不是 `auth` 里。
         for (provider, uid) in [("workbuddy", "uid-wb"), ("qoder", "uid-qd")] {
             store.add_account(
                 &json!({ "auth": { "accessToken": format!("token-{uid}") }, "account": { "uid": uid } }),

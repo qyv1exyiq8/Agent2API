@@ -119,15 +119,52 @@ impl RequestTelemetry {
 
     pub fn note_attempt_response(&self) {
         let mut guard = self.lock();
+        let now = crate::server::logging::now_ms();
+        // 当前尝试的响应头时刻**总要**记（明细数组超限时 `current_attempt_mut()`
+        // 会返回 None，那条时刻就丢了 —— 延迟采样会退化成「整段耗时」）。
+        guard.current_response_at = Some(now);
         let Some(last) = guard.current_attempt_mut() else { return };
         if last.response_at.is_none() {
-            last.response_at = Some(crate::server::logging::now_ms());
+            last.response_at = Some(now);
             self.flush_live(&guard);
         }
     }
 
+    /// 本次尝试的**首帧延迟**（毫秒），没有可用样本时 None。
+    ///
+    /// ── 为什么有两条口径 ────────────────────────────────────────
+    /// 流式/无状态路径走 `send_with_retry`，收到响应头时会调
+    /// [`RequestTelemetry::note_attempt_response`]，于是 `response_at` 有值 ——
+    /// 那是真正的「首帧时刻」。
+    ///
+    /// 会话式与自定义提供商路径不走 `send_with_retry`，**从不**调那个钩子，
+    /// `response_at` 恒为 None。若只认 `response_at`，这两条路径的延迟永远
+    /// 采不到（延迟评分对它们完全失效）。所以这里回退到「当前时刻 −
+    /// started_at」：那不是首帧，但对**非流式**响应而言，上游返回结果的时刻
+    /// 本身就是「上游花了多久」的合理代理。
+    ///
+    /// 宁可要一个粗口径的样本，也不要整条路径没有样本。
+    pub fn attempt_latency_ms(&self) -> Option<i64> {
+        let guard = self.lock();
+        // 当前尝试的开始时刻：与历史数组解耦（数组有 24 条上限，超限后
+        // `last()` 会拿到陈旧尝试）。
+        let started = guard.current_started_at?;
+        // 响应头时刻（流式/无状态路径有）；没有就退到「现在」。
+        let response_at = guard.current_response_at
+            .or_else(|| guard.attempts_detail.last().and_then(|attempt| attempt.response_at));
+        let end = response_at.unwrap_or_else(crate::server::logging::now_ms);
+        Some(end.saturating_sub(started).max(0))
+    }
+
     pub fn note_attempt_started(&self, provider: &str, account: &str) {
         let mut guard = self.lock();
+        // 当前尝试的时刻**总要**记：明细数组有 24 条上限，超限后不再 push，
+        // 但延迟采样要的是「当前这一轮」，不能退化成取更早的尝试。
+        guard.current_started_at = Some(crate::server::logging::now_ms());
+        // 上一轮的响应头时刻**必须清掉**：换号重试时，若新一轮因数组超限而
+        // 没记到自己的响应头时刻，就会拿上一轮的旧值去减新一轮的开始时刻 ——
+        // 算出一个跨轮的错误延迟（甚至负数）。
+        guard.current_response_at = None;
         if guard.attempts_detail.len() >= MAX_ATTEMPT_DETAILS { return; }
         let account_id = guard.account_id.clone();
         let candidate_id = guard.route.as_ref().and_then(|route| route.get("pickedCandidate")).and_then(Value::as_str).unwrap_or(&account_id).to_string();

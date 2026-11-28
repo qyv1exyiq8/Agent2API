@@ -26,7 +26,32 @@ pub async fn get_groups(State(state): State<ServerState>) -> Response {
 pub async fn shared_models(State(state): State<ServerState>) -> Response {
     match tokio::task::spawn_blocking(move || {
         let store = state.store();
-        json!({ "shared": routing_groups::discover_shared_models(&store) })
+        let mut shared = routing_groups::discover_shared_models(&store);
+        // 已占用的对外 ID —— 三类来源都要算：
+        //   1. 现有路由组的 id 与 model；
+        //   2. 模型映射（profiles.models 的键）；
+        //   3. **已被任何提供商承载的模型名**（后端 `save` 会拒掉这些）。
+        // 第 3 类最要紧：`choices` 正好枚举了目录里所有被承载的模型名，
+        // 用它当占用源，保证建议出来的名字一定能建组。
+        let profiles = config::routing_profiles();
+        let mut taken: Vec<String> = Vec::new();
+        for group in profiles.groups.values() {
+            taken.push(group.id.clone());
+            taken.push(group.model.clone());
+        }
+        taken.extend(profiles.models.keys().cloned());
+        for row in routing_groups::choices(&store) {
+            if let Some(model) = row.get("model").and_then(Value::as_str) {
+                taken.push(model.to_string());
+            }
+        }
+        // 建议的对外 ID 由**后端**给出：这条规则（对外 ID 不能与已有模型重名）
+        // 本来就是后端校验决定的，前端自己拼必然漂。
+        for entry in shared.iter_mut() {
+            let Some(model) = entry.get("model").and_then(Value::as_str).map(str::to_string) else { continue };
+            entry["suggestedModel"] = Value::from(routing_groups::shared_group_model_id(&model, &taken));
+        }
+        json!({ "shared": shared })
     }).await {
         Ok(value) => ok_json(value), Err(error) => errors::management_error(500, error.to_string()),
     }
