@@ -88,13 +88,17 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, routeContex
   const [pane, setPane] = React.useState<PaneId>('basic')
   // 并发上限草稿（原列表 ⋯ 菜单的 conc-dialog 迁入「基本」分组）：0~999，0 = 不限
   const [concDraft, setConcDraft] = React.useState(() => String(Number(account?.maxConcurrent) || 0))
+  // 共享配额池草稿（可选）：同池账号共用一份上游额度 —— 其中一个撞额度耗尽时，
+  // 整池对该模型一起短暂冷却，避免请求按优先级逐个去撞同一个已空掉的池。
+  // 空串 = 不参与任何池（与改造前行为完全一致）。
+  const [poolDraft, setPoolDraft] = React.useState(() => String(account?.quotaPool || ''))
   const [confirming, setConfirming] = React.useState(false)
   const actionLock = React.useRef(false)
   const paneScroll = React.useRef<HTMLDivElement | null>(null)
   const panePositions = React.useRef<Partial<Record<PaneId, number>>>({})
   const initial = React.useRef({
     enabled, allowRouteSkip, name, userAgent, proxyDraft, planChannel, usageDraft,
-    balanceQueryDraft, limiterDraft, concDraft, noAuthDraft,
+    balanceQueryDraft, limiterDraft, concDraft, poolDraft, noAuthDraft,
   })
   const credentialLabel = providerOf(account).startsWith('custom-') ? t('凭证设置') : t('凭证与套餐')
   const paneInfo: Record<PaneId, { title: string; description: string; icon: string }> = {
@@ -180,7 +184,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, routeContex
   const dirtyPanes: Record<PaneId, boolean> = {
     basic: enabled !== before.enabled || allowRouteSkip !== before.allowRouteSkip
       || (name.trim() || before.name) !== before.name || userAgent.trim() !== before.userAgent
-      || concDraft !== before.concDraft,
+      || concDraft !== before.concDraft || poolDraft.trim() !== before.poolDraft.trim(),
     credential: Boolean(balanceToken.trim() || apiKeyDraft.trim())
       || noAuthDraft !== before.noAuthDraft || planChannel !== before.planChannel,
     query: !same(usageDraft, before.usageDraft) || !same(balanceQueryDraft, before.balanceQueryDraft),
@@ -432,6 +436,11 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, routeContex
     const concNext = Math.min(CONC_MAX, Math.round(concRaw))
     const concCurrent = Number(target.maxConcurrent) || 0
     const concPatch: Record<string, unknown> = concNext !== concCurrent ? { maxConcurrent: concNext } : {}
+    // 共享配额池：空串 = 清除（后端把 null 解释成「不属于任何池」）。
+    // 只提交真正变化的值，避免每次保存都多一条「共享配额池 → …」的变更日志。
+    const poolNext = poolDraft.trim().slice(0, 64)
+    const poolCurrent = String(target.quotaPool || '').trim()
+    const poolPatch: Record<string, unknown> = poolNext !== poolCurrent ? { quotaPool: poolNext || null } : {}
     if (providerPatch && !await askConfirmation(t('保存提供商共用配置？'),
       t('「{name}」名下 {count} 个账号共用这些连接设置。修改协议或 Base URL 可能中断正在进行的请求。',
         { name: provider?.name || provider?.id || '', count: providerCount }), t('确认保存'))) return
@@ -467,6 +476,7 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, routeContex
         ...planPatch,
         ...credentialPatch,
         ...concPatch,
+        ...poolPatch,
         ...(balanceQueryPatch ? { balanceQuery: balanceQueryPatch } : {}),
         ...(usageChanges && 'patch' in usageChanges ? usageChanges.patch : {}),
         ...(limiterChanges && 'patch' in limiterChanges ? limiterChanges.patch : {}),
@@ -628,6 +638,14 @@ export function AccountSettingsDialog({ id, onClose, initialAccount, routeContex
                           </div>
                           <Input id='account-conc-input' type='number' min={0} max={CONC_MAX} step={1}
                             value={concDraft} onChange={event => setConcDraft(event.currentTarget.value)} />
+                        </Field>
+                        <Field className='acct-dlg-field'>
+                          <FieldLabel htmlFor='account-pool-input'>{t('共享配额池')}</FieldLabel>
+                          <Input id='account-pool-input' type='text' maxLength={64} placeholder={t('例如 shared-pool（留空 = 不参与）')}
+                            value={poolDraft} onChange={event => setPoolDraft(event.currentTarget.value)} />
+                          <FieldDescription>
+                            {t('同池账号共用一份上游额度：其中一个额度耗尽时，整池对该模型短暂冷却，避免请求逐个去撞同一个已空掉的池。留空表示不参与任何池。')}
+                          </FieldDescription>
                         </Field>
                       </SettingGroup>
                       <p className='detail acct-dlg-hint'>{concDefault > 0

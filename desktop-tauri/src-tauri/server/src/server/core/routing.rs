@@ -684,8 +684,13 @@ pub fn plan_route(
         }
         let reset_at = rate_limit_reset_at(account, keys, now);
         if reset_at > 0 {
+            // 谁的恢复时刻最晚，就以谁的名义解释 —— 四层冷却（账号 / 提供商 /
+            // 本模型 / 共享配额池）里只报最相关的那一个，不把池冷却误说成模型冷却。
             let scope = if account.pointer("/providerCooldown/resetAt").and_then(Value::as_i64).unwrap_or(0) == reset_at { "提供商" }
                 else if account.pointer("/routingCooldowns/@account/resetAt").and_then(Value::as_i64).unwrap_or(0) == reset_at { "账号" }
+                else if account.pointer("/quotaPoolCooldown/resetAt").and_then(Value::as_i64).unwrap_or(0) == reset_at {
+                    "共享配额池（同池账号共用额度）"
+                }
                 else { "该账号的当前模型" };
             blocked.push(entry(
                 "cooldown",

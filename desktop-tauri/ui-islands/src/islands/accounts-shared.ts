@@ -236,6 +236,11 @@ export type AccountRecord = {
    */
   balanceQuery?: BalanceQueryPublic
   maxConcurrent?: number
+  /**
+   * 共享配额池 id（可选）：同池账号共用一份上游额度。其中一个额度耗尽时，
+   * 整池对该模型一起短暂冷却。缺省/空串 = 不参与任何池（行为与改造前一致）。
+   */
+  quotaPool?: string
   allowRouteSkip?: boolean
   checkinAt?: number
   /**
